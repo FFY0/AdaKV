@@ -1,0 +1,1 @@
+{"window_size": 32, "base_capacity": 1024, "kernel_size": 7, "pooling": "maxpool"}
