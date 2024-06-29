@@ -1,8 +1,3 @@
-import os
-# os.environ['CUDA_VISIBLE_DEVICES'] = '2,3'
-# TEST = True
-import sys
-sys.path.append('/tmp/pycharm_project_148/')
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset, load_from_disk
 import json
@@ -11,6 +6,16 @@ import numpy as np
 import random
 import argparse
 import torch
+
+
+#os.environ['CUDA_VISIBLE_DEVICES'] = '3'
+# TEST = True
+import os
+import sys
+
+project_path = os.getenv("project_dir")
+sys.path.append(project_path)
+
 from adaptive_snapkv.monkeypatch.monkeypatch import  replace_mistral_fixed,replace_mistral_adaptive
 def parse_args(args=None):
     parser = argparse.ArgumentParser()
@@ -22,6 +27,8 @@ def parse_args(args=None):
     parser.add_argument('--adaptive', action='store_true', help="Use adaptive budgets allocation across heads")
     parser.add_argument('--e', default=False, help="Evaluate on LongBench-E")
     parser.add_argument('--floor',type=float,help="floor budgets for each head")
+    parser.add_argument('--skip',default=0,type=int,help="skip layer num")
+    parser.add_argument('--normalize',action='store_true')
     return parser.parse_args(args)
 
 # This is the customized building prompt for chat models
@@ -78,12 +85,15 @@ def get_pred_single_gpu(data, max_length, max_gen,
                         base_capacity = None,
                         kernel_size = None,
                         pooling = None,
-                        floor=None):
+                        floor=None,
+                        skip = None,
+                        normalize = None):
     # device = torch.device(f'cuda:{rank}')
     # device = model.device
+    # model, tokenizer = load_model_and_tokenizer(model2path[model_name], model_name, device = "cuda", compress=compress)
     model, tokenizer = load_model_and_tokenizer(model2path[model_name], model_name, device = "cuda", compress=compress)
     device = model.device
-    for json_obj in tqdm(data):
+    for json_obj in tqdm(data,dynamic_ncols=True, leave=True):
         ############################################################################################################
         # load compress args
         if compress:
@@ -93,6 +103,8 @@ def get_pred_single_gpu(data, max_length, max_gen,
             model.model.config.kernel_size = kernel_size
             model.model.config.pooling = pooling
             model.model.config.floor = floor
+            model.model.config.skip = skip
+            model.model.config.normalize = normalize
         ############################################################################################################
         
         prompt = prompt_format.format(**json_obj)
@@ -146,6 +158,7 @@ def seed_everything(seed):
     torch.cuda.manual_seed_all(seed)
 
 def load_model_and_tokenizer(path, model_name, device, compress=False):
+    models_dir= os.getenv('models_dir')
     if "chatglm" in model_name or "internlm" in model_name or "xgen" in model_name:
         assert False,"not support so far"
         tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
@@ -205,7 +218,7 @@ def load_model_and_tokenizer(path, model_name, device, compress=False):
     elif "mistral" in model_name:
         if not compress:
             model = AutoModelForCausalLM.from_pretrained(
-                pretrained_model_name_or_path="/raid/share_files/models/Mistral-7B-Instruct-v0.2",
+                pretrained_model_name_or_path=os.path.join(models_dir,"Mistral-7B-Instruct-v0.2"),
                 torch_dtype=torch.float16,
                 low_cpu_mem_usage=True,
                 device_map="auto",
@@ -214,7 +227,7 @@ def load_model_and_tokenizer(path, model_name, device, compress=False):
             )
         else:
             model = AutoModelForCausalLM.from_pretrained(
-                pretrained_model_name_or_path="/raid/share_files/models/Mistral-7B-Instruct-v0.2",
+                pretrained_model_name_or_path=os.path.join(models_dir,"Mistral-7B-Instruct-v0.2"),
                 torch_dtype=torch.float16,
                 low_cpu_mem_usage=True,
                 device_map="auto",
@@ -222,7 +235,7 @@ def load_model_and_tokenizer(path, model_name, device, compress=False):
                 use_flash_attention_2=True
             )
         tokenizer = AutoTokenizer.from_pretrained(
-            "/raid/share_files/models/Mistral-7B-Instruct-v0.2",
+            os.path.join(models_dir,"Mistral-7B-Instruct-v0.2"),
             padding_side="right",
             use_fast=False,
         )
@@ -237,23 +250,31 @@ if __name__ == '__main__':
     model2path = json.load(open("config/model2path.json", "r"))
     model2maxlen = json.load(open("config/model2maxlen.json", "r"))
     model_name = args.model
-    # if TEST is not None:
-    #     args.adaptive = True
-    #     args.floor = 0.2
-    #     args.compress_args_path = "c1024_w32_k7_maxpool.json"
     # define your model
     max_length = model2maxlen[model_name]
     if args.e:
         datasets = ["qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "gov_report", "multi_news", \
             "trec", "triviaqa", "samsum", "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
     else:
-        datasets = ["gov_report", "qasper", "multifieldqa_en", "hotpotqa","qmsum","passage_count",  "2wikimqa", "musique", \
-              "multi_news", "trec", "triviaqa", "samsum","passage_retrieval_en", "narrativeqa",\
+        # datasets = [ "qasper","passage_count", "multifieldqa_en", "hotpotqa","qmsum",  "2wikimqa", "musique","gov_report", \
+        #       "multi_news", "trec", "triviaqa", "samsum","passage_retrieval_en", "narrativeqa",\
+        #              "lcc", "repobench-p"]
+        datasets = ["samsum","passage_retrieval_en", "narrativeqa",\
                      "lcc", "repobench-p"]
+    prefix_name = "oldbound_"
+    # if TEST is not None:
+    #     args.adaptive = True
+    #     args.floor = 0.5
+    #     args.skip = 0
+    #     args.normalize = True
+    #     datasets = ['qasper',"passage_count", ]
+    #     prefix_name += "LocalTEST_1024_oldbound"
+    #     args.compress_args_path = "c1024_w32_k7_maxpool.json"
     for dataset in datasets:
+        print(f"Predicting on {dataset}...")
         # we design specific prompt format and max generation length for each task, feel free to modify them to optimize model output
-        dataset2prompt = json.load(open("config/dataset2prompt.json", "r"))
-        dataset2maxlen = json.load(open("config/dataset2maxlen.json", "r"))
+        dataset2prompt = json.load(open("config/dataset2prompt.json", "r", encoding="utf-8"))
+        dataset2maxlen = json.load(open("config/dataset2maxlen.json", "r", encoding="utf-8"))
         # predict on each dataset
         if not os.path.exists("pred"):
             os.makedirs("pred")
@@ -261,10 +282,12 @@ if __name__ == '__main__':
             os.makedirs("pred_e")
         # for dataset in datasets:
         if args.compress_args_path:
-            compress_args = json.load(open(os.path.join('/tmp/pycharm_project_148/experiments/LongBench/config', args.compress_args_path), "r"))
+            compress_args = json.load(open(os.path.join('config', args.compress_args_path), "r"))
             compress_args['floor'] = args.floor
+            compress_args['skip'] = args.skip
+            compress_args['normalize'] = args.normalize
             compress = True
-            write_model_name = model_name + args.compress_args_path.split(".")[0]+f'_floor{args.floor}_adaptive{args.adaptive}'
+            write_model_name = prefix_name + model_name + args.compress_args_path.split(".")[0]+f'_floor{args.floor}_adaptive{args.adaptive}_skip{args.skip}_RW{args.normalize}'
             if args.adaptive:
                 replace_mistral_adaptive()
             else:
@@ -276,6 +299,7 @@ if __name__ == '__main__':
             compress = False
             compress_args = None
             write_model_name = model_name
+        datasets_path = os.getenv("datasets_dir")
         if args.e:
             assert False,"not support so far"
             data = load_dataset('THUDM/LongBench', f"{dataset}_e", split='test')
@@ -284,7 +308,8 @@ if __name__ == '__main__':
             out_path = f"pred_e/{write_model_name}/{dataset}.jsonl"
         else:
             # data = load_dataset('THUDM/LongBench', dataset, split='test')
-            data = load_from_disk(f"/raid/fengyuan/datasets/LongBench/{dataset}_test/")
+            data = load_from_disk(os.path.join(datasets_path, f"LongBenchLocal/{dataset}_test/"))
+            # data = load_from_disk(f"/raid/fengyuan/datasets/LongBench/{dataset}_test/")
             if not os.path.exists(f"pred/{write_model_name}"):
                 os.makedirs(f"pred/{write_model_name}")
             out_path = f"pred/{write_model_name}/{dataset}.jsonl"

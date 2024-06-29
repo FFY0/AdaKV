@@ -337,6 +337,7 @@ def adaptive_mistral_flash_attn2_forward(
             and kv_seq_len > self.config.sliding_window
             and cache_has_contents
         ):
+            # TODO: sliding window support
             slicing_tokens = 1 - self.config.sliding_window
 
             past_key = past_key_value[self.layer_idx][0]

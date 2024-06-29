@@ -70,7 +70,8 @@ class SnapKVCluster():
             value_states = torch.cat([v_past_compress, v_cur], dim = 2)
             return key_states, value_states
 class AdaptiveSnapKVCluster():
-    def __init__(self, window_size = 32, kernel_size = 7, pooling = 'maxpool',base_capacity=None,floor = None):
+
+    def __init__(self, window_size = 32, kernel_size = 7, pooling = 'maxpool',base_capacity=None,floor = None,skip = None,normalize=None, layer_idx = None, num_hidden_layers = None, pyram_mode = False, pyram_beta = 20):
         self.window_size = window_size
         self.kernel_size = kernel_size
         self.pooling = pooling
@@ -78,6 +79,16 @@ class AdaptiveSnapKVCluster():
         self.floor_ratio = floor
         self.floor_capacity = int(self.base_capacity * self.floor_ratio)
         self.adaptive_capacity = self.base_capacity - self.floor_capacity
+        self.skip_layer_nums = skip
+
+        self.normalize = normalize
+        self.pyram_init = False
+        self.pyram_mode = pyram_mode
+        self.pyram_beta = pyram_beta
+        self.layer_idx = layer_idx
+        self.num_hidden_layers = num_hidden_layers
+
+
     def calcul_attn_sore(self, key_states, query_states):
         bsz, num_heads, q_len, head_dim = query_states.shape
         attn_weights = torch.matmul(query_states[..., -self.window_size:, :], key_states.transpose(2, 3)) / math.sqrt(
@@ -112,20 +123,65 @@ class AdaptiveSnapKVCluster():
         attn_score= self.calcul_attn_sore(key_states,query_states)
         origin_heads_key_states = torch.split(key_states, 1, dim=1)
         origin_heads_value_states = torch.split(value_states, 1, dim=1)
+
+        # compute pyramidal capacity
+        if self.pyram_mode and not self.pyram_init:
+            # NOTE: (max_num + min_num) / 2 == base_capacity to restrict the total capacity
+            min_num = self.base_capacity // self.pyram_beta
+            max_num = self.base_capacity * 2 - min_num
+                
+            # if the max_num is larger than the query length, we need to adjust the max_num
+            if max_num >= q_len - self.window_size:
+                max_num = q_len - self.window_size
+                min_num = self.base_capacity * 2 - max_num
+        
+            # NOTE: compute interval
+            # TODO: round up to shift down
+            steps = (max_num - min_num) // (self.num_hidden_layers - 1)
+
+            # renew adaptive capacity
+            self.base_capacity = max_num - self.layer_idx * steps
+            self.floor_capacity = int(self.base_capacity * self.floor_ratio)
+            self.adaptive_capacity = self.base_capacity - self.floor_capacity
+            self.pyram_init = True
+            print(f"Pyram mode adaptive capacity, layer: {self.layer_idx}, acap: {self.adaptive_capacity}, bcap: {self.base_capacity}, fcap: {self.floor_capacity}")
+
         if self.base_capacity > attn_score.size(-1):
             # not compress
             return origin_heads_key_states,origin_heads_value_states
+
         # if you need to weight the attn_score
         pass
         sorted_attn_score,sorted_attn_score_indices = attn_score.sort(dim=-1,descending=True)
-        adaptive_attn_score = sorted_attn_score[..., self.floor_capacity:]
-        length = adaptive_attn_score.size(dim=-1)
-        adaptive_attn_score = adaptive_attn_score.reshape(bsz,length*num_heads)
-        sorted_indices = torch.topk(adaptive_attn_score,k=num_heads*self.adaptive_capacity,dim=-1).indices
-        sorted_indices = sorted_indices//length
-        # floor capacity set
-        head_adaptive_capacity = torch.ones((bsz,num_heads),device=_device,dtype = sorted_indices.dtype)*self.floor_capacity
-        head_adaptive_capacity.scatter_add_(-1,sorted_indices,torch.ones_like(sorted_indices,dtype=head_adaptive_capacity.dtype),)
+        if self.layer_idx >= self.skip_layer_nums:
+            adaptive_attn_score = sorted_attn_score
+            length = adaptive_attn_score.size(dim=-1)
+            if self.normalize:
+                ratio_weight = sorted_attn_score[...,:self.base_capacity].sum(dim=-1,keepdim=True)/sorted_attn_score.sum(dim=-1,keepdim=True)
+                adaptive_attn_score = adaptive_attn_score*ratio_weight
+            adaptive_attn_score = adaptive_attn_score.reshape(bsz,length*num_heads)
+            sorted_indices = torch.topk(adaptive_attn_score,k=num_heads*self.base_capacity,dim=-1).indices
+            sorted_indices = sorted_indices//length
+            # floor capacity set
+            head_adaptive_capacity = torch.zeros((bsz,num_heads),device=_device,dtype = sorted_indices.dtype)
+            head_adaptive_capacity.scatter_add_(-1,sorted_indices,torch.ones_like(sorted_indices,dtype=head_adaptive_capacity.dtype),)
+            assert head_adaptive_capacity.sum().item() == num_heads*self.base_capacity
+            head_adaptive_capacity = torch.round(head_adaptive_capacity * (1-self.floor_ratio) + self.floor_capacity).int()
+            # print(f"layer {layer_idx} ave head capacity {head_adaptive_capacity.sum().item()/32}")
+
+            # adaptive_attn_score = sorted_attn_score[..., self.floor_capacity:]
+            # length = adaptive_attn_score.size(dim=-1)
+            # if self.normalize:
+            #     ratio_weight = sorted_attn_score[...,:self.base_capacity].sum(dim=-1,keepdim=True)/sorted_attn_score.sum(dim=-1,keepdim=True)
+            #     adaptive_attn_score = adaptive_attn_score*ratio_weight
+            # adaptive_attn_score = adaptive_attn_score.reshape(bsz,length*num_heads)
+            # sorted_indices = torch.topk(adaptive_attn_score,k=num_heads*self.adaptive_capacity,dim=-1).indices
+            # sorted_indices = sorted_indices//length
+            # # floor capacity set
+            # head_adaptive_capacity = torch.ones((bsz,num_heads),device=_device,dtype = sorted_indices.dtype)*self.floor_capacity
+            # head_adaptive_capacity.scatter_add_(-1,sorted_indices,torch.ones_like(sorted_indices,dtype=head_adaptive_capacity.dtype),)
+        else:
+            head_adaptive_capacity = torch.ones((bsz,num_heads),device=_device,dtype = sorted_attn_score_indices.dtype) * self.base_capacity
         sorted_attn_score_indices = sorted_attn_score_indices.split(1,dim=1)
         heads_key_states = []
         heads_value_states = []
@@ -164,11 +220,24 @@ def init_adaptive_snapkv(self):
     assert hasattr(self.config,"floor"),"floor not set"
     assert self.config.floor is not None
 
-    self.kv_cluster = AdaptiveSnapKVCluster(
-        window_size = self.config.window_size,
-        base_capacity=self.config.base_capacity,
-        kernel_size = self.config.kernel_size,
-        pooling = self.config.pooling,
-        floor= self.config.floor
-        )
+
+    # init only once
+    if not hasattr(self, "kv_cluster"):
+        self.kv_cluster = AdaptiveSnapKVCluster(
+            window_size = self.config.window_size,
+            base_capacity=self.config.base_capacity,
+            kernel_size = self.config.kernel_size,
+            pooling = self.config.pooling,
+            floor= self.config.floor,
+            skip = self.config.skip,
+            layer_idx = self.layer_idx,
+            normalize = self.config.normalize,
+            num_hidden_layers = self.config.num_hidden_layers,
+            pyram_mode = self.config.pyram_mode,
+            pyram_beta = self.config.pyram_beta,
+            )
+
+    print(f"Compress config: window_size={self.kv_cluster.window_size}, base_capacity={self.kv_cluster.base_capacity}, kernel_size={self.kv_cluster.kernel_size}, pooling={self.kv_cluster.pooling}, floor={self.kv_cluster.floor_ratio}, pyram_mode={self.kv_cluster.pyram_mode}, beta={self.kv_cluster.pyram_beta}")
+
+
 
