@@ -161,4 +161,9 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 notebooks/test*
-experiments/LongBench/pred*
+experiments/LongBench/bak/buggy
+experiments/LongBench/archive
+experiments/LongBench/ignore
+experiments/LongBench/Log
+.vscode
+.idea

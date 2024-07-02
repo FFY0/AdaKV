@@ -1,53 +1,151 @@
-# SnapKV :camera:
-We introduce an innovative and out-of-box KV cache compression method, [SnapKV](https://arxiv.org/abs/2404.14469).
-## Requirements
-Currently tested with `transformers==4.37.0`, need to check if it is compatible with higher version.
+# AdaKV
+Adaptive Allocation across different attention heads based on their concentration degrees effectively improves budget utilization, thereby improving post-eviction generation quality.
+
+<p align="center">
+    <img src="./assets/images/main.png" width=70%/>
+</p>
+
+## Usage
+
+### Requirements
+
 ```
-transformers>=4.36
+transformers==4.37.2
 flash-attn==2.4.0
+
+datasets
+tiktoken
+jieba
+rouge_score
 ```
-## Installation
+
+### Installation
+
 ```
-git clone git@github.com:FasterDecoding/SnapKV.git
-cd SnapKV
-pip install -e .
+git clone https://github.com/FFY0/AdaKV
+cd AdaKV
+make i
 ```
-## Quick Start
-### Use SnapKV-optimized Models
-For example:
+
+### Quick Start
 
 ```python
-from adaptive_snapkv.monkeypatch.monkeypatch import replace_mistral
+# replace modeling with adakv
+from adaptive_snapkv.monkeypatch.monkeypatch import replace_mistral_adaptive, replace_llama_adaptive
+replace_mistral_adaptive()
+replace_llama_adaptive()
 
-replace_mistral()  # Use monkey patches enable SnapKV
+model = AutoModelForCausalLM.from_pretrained(
+    model_name_or_path,
+    config=config,
+    device_map=device_map,
+    attn_implementation="flash_attention_2",
+    torch_dtype=torch.bfloat16,
+    trust_remote_code=True,
+)
+
+# config hyperparameters
+compress_args = {}
+def config_compress(model, window_size=32, base_capacity=512, kernel_size=7, pooling="maxpool", floor_alpha=0.5, pyram_mode = False, beta = 20):
+    model.model.config.window_size = window_size
+    model.model.config.base_capacity = base_capacity
+    model.model.config.kernel_size = kernel_size
+
+    model.model.config.pooling = pooling
+    model.model.config.floor_alpha = floor_alpha
+
+    model.model.config.pyram_mode = pyram_mode
+    model.model.config.pyram_beta = beta
+    return model
+
+model = config_compress(model, **compress_args)
 ```
 
-Check [the example notebook](./notebooks/example.ipynb).
+#### Flattened Storage and Flash Attention Support
 
-### Customize Your SnapKV-optimized Models
-SnapKV can be easily integrated with other models. 
+Considering varied cache length across heads, we implement a flattened storage layout of KV cache combined with `flash_attn_varlen_func` for efficent computation.
 
-You can follow the comment marked with `[SnapKV]` in [existing models](adaptive_snapkv/monkeypatch/monkeypatch.py) to construct your own models. (Currently we support [Llama family](adaptive_snapkv/monkeypatch/llama_hijack_4_37.py)/ [Mistral](adaptive_snapkv/monkeypatch//mistral_hijack_4_37.py)/ [Mixtral](adaptive_snapkv/monkeypatch//mixtral_hijack_4_37.py)) 
+##### Regular MHA Cache Storage
 
-The detailed algorithm of SnapKV is in [`snapkv_utils.py`](adaptive_snapkv/monkeypatch/snapkv_utils.py)
+```
+Layer i:
+    head0: (t00, t01, t02)
+    head1: (t10, t11, t12)
+    head2: (t20, t21, t22) 
 
+past_key_value.update():
 
-## Partial Results
-![Comprehensive Experiment Results on LongBench](./assets/longbench.jpg)
-![Pressure Test Result on Needle-in-a-Haystack](./assets/LWM-Text-Chat-1M_SnapKV.jpg)
+Layer i:
+    head0: (t00, t01, t02, t03)
+    head1: (t10, t11, t12, t13)
+    head2: (t20, t21, t22, t23)
 
-## TODO
-- [ ] Add observation experiments for reduplication.
-- [ ] Add LongBench for reduplication.
-- [ ] Explore the prompt phase compression.
+```
+
+Note. `tij` means cache element of token j on head i in this case.
+
+##### Flattened Cache Storage  
+
+The corresponding cuda code can be found in [`./csrc/csrc/cuda_api.cu`](./csrc/csrc/cuda_api.cu).
+```
+Layer i:
+    (t00, t01, t02, t03) (t10, t11) (t20, t21, t22)
+
+past_key_value.update():
+
+Layer i:
+    phase 0: malloc empty cache
+    (_, _, _, _, _) (_, _, _) (_, _, _, _)
+
+    phase 1: copy old value
+    (t00, t01, t02, t03, _) (t10, t11, _) (t20, t21, t22, _)
+    
+    phase 2: insert new value
+    (t00, t01, t02, t03, t04) (t10, t11, t12) (t20, t21, t22, t23)
+```
+
+Details about flash_attn_varlen_func can be found in [`Repo`](https://github.com/Dao-AILab/flash-attention/blob/c4b9015d74bd9f638c6fd574482accf4bbbd4197/flash_attn/flash_attn_interface.py#L1051).
+
+##### Peak Memory Footprint and Decoding Latency For Our Implementation:
+<p align="center">
+<img src="./assets/images/mem.png" width=25%/>     <img src="./assets/images/speed.png" width=25%/>
+</p>
+
+## Evaluations
+### LongBench
+
+![](./assets/images/LongBench_mistral.png)
+
+```bash
+cd ./experiments/LongBench
+bash runall.sh
+```
+
 
 ## Citation
-If you feel this project is helpful, please consider cite our report :blush:
+If you found our work valuable, please cite:
 ```
-@article{li2024snapkv,
-  title={SnapKV: LLM Knows What You are Looking for Before Generation},
-  author={Li, Yuhong and Huang, Yingbing and Yang, Bowen and Venkitesh, Bharat and Locatelli, Acyr and Ye, Hanchen and Cai, Tianle and Lewis, Patrick and Chen, Deming},
-  journal={arXiv preprint arXiv:2404.14469},
-  year={2024}
+@misc{feng2024adakvoptimizingkvcache,
+      title={Ada-KV: Optimizing KV Cache Eviction by Adaptive Budget Allocation for Efficient LLM Inference}, 
+      author={Yuan Feng and Junlin Lv and Yukun Cao and Xike Xie and S. Kevin Zhou},
+      year={2024},
+      eprint={2407.11550},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2407.11550}, 
 }
 ```
+
+## Acknowledgement
+
+We extend our gratitude to [SnapKV](https://github.com/FasterDecoding/SnapKV)  and [PyramidKV](https://github.com/Zefan-Cai/PyramidKV) for their contributions of open-source code, which have significantly facilitated the advancement of this project.
+
+## Misc
+
+### Observation
+
+Different attention heads within each layer of LLMs exhibit significant disparities in the degrees of attention concentration. 
+
+Therefore, we can improves budget utilization by dynamically allocating the budget across different attention heads within the same layer based on their concentration degrees.
+
+![](./assets/images/head_vary.png)
