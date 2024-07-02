@@ -5,9 +5,162 @@ import time
 import torch.nn.functional as F
 import torch.nn as nn
 import math
+from typing import List, Optional, Tuple, Union, Any,Dict
+from transformers.cache_utils import Cache, DynamicCache
 
 # perform qk calculation and get indices
 # this version will not update in inference mode
+
+class DynamicCacheSplitHeadFlatten(Cache):
+    def __init__(self) ->None:
+        # Token wise List[]  Head wise KV List[torch.Tensor]
+        super().__init__()
+        self.key_cache: List[List[torch.Tensor]] = []
+        self.value_cache: List[List[torch.Tensor]] = []
+        self._seen_tokens = 0
+
+    def __len__(self):
+        return len(self.key_cache)
+
+    def __iter__(self):
+        for layer_idx in range(len(self)):
+            yield (tuple(self.key_cache[layer_idx]),tuple(self.value_cache[layer_idx]))
+
+    def __getitem__(self, layer_idx: int) -> Tuple[Tuple[torch.Tensor],Tuple[torch.Tensor]]:
+        if layer_idx < len(self):
+            return (tuple(self.key_cache[layer_idx]),tuple(self.value_cache[layer_idx]))
+        else:
+            raise KeyError(f"Cache only has {len(self)} layers, attempted to access layer with index {layer_idx}")
+
+    def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+        # NOTE: k, v = [head_num](bs, 1, seqlen, dim)
+        # each layer is a flatten layout like:
+        # [head_0_len + head_1_len + ..., dim]
+        if len(self.key_cache) <= layer_idx:
+
+            self.key_cache.append(key_states)
+            self.value_cache.append(value_states)
+
+        else:
+            bs, head, seqlen, dim = key_states.shape
+            assert bs == 1 and seqlen == 1 
+            # NOTE: phase 2. we got [bs, head, seqlen, dim] as k, v input
+            head_lens = cache_kwargs["head_lens"]
+
+            # NOTE: expand_varlen_cache
+            from tiny_api_cuda import expand_varlen_cache
+
+            self.key_cache[layer_idx] = expand_varlen_cache(self.key_cache[layer_idx], head_lens)
+            self.value_cache[layer_idx] = expand_varlen_cache(self.value_cache[layer_idx], head_lens)
+
+            insert_idx = torch.tensor(head_lens, dtype=torch.int32, device=key_states.device)
+            pos = insert_idx.cumsum(dim=0)
+            off = torch.arange(0, len(head_lens), device=insert_idx.device)
+            insert_idx = pos + off
+            self.key_cache[layer_idx][insert_idx] = key_states.view(-1, dim)
+            self.value_cache[layer_idx][insert_idx] = value_states.view(-1, dim)
+
+        return self.key_cache[layer_idx], self.value_cache[layer_idx]
+
+    def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
+        if len(self.key_cache) <= layer_idx:
+            return 0
+
+        # TODO: return 1 to means has content for now
+        return 1
+        # return max(map(lambda states: states.shape[-2], self.key_cache[layer_idx]))
+
+    def get_max_length(self) -> Optional[int]:
+        return None
+
+    def to_legacy_cache(self) -> Tuple[Tuple[torch.Tensor], Tuple[torch.Tensor]]:
+        """Converts the `DynamicCache` instance into the its equivalent in the legacy cache format."""
+        legacy_cache = ()
+        for layer_idx in range(len(self)):
+            legacy_cache += ((self.key_cache[layer_idx], self.value_cache[layer_idx]),)
+        return legacy_cache
+
+    @classmethod
+    def from_legacy_cache(cls, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None) -> "DynamicCacheEachHead":
+        """Converts a cache in the legacy cache format into an equivalent `DynamicCache`."""
+        cache = cls()
+        if past_key_values is not None:
+            for layer_idx in range(len(past_key_values)):
+                key_states, value_states = past_key_values[layer_idx]
+                cache.update(key_states, value_states, layer_idx)
+        return cache
+
+
+
+class DynamicCacheSplitHead(Cache):
+    def __init__(self) ->None:
+        # Token wise List[]  Head wise KV List[torch.Tensor]
+        super().__init__()
+        self.key_cache: List[List[torch.Tensor]] = []
+        self.value_cache: List[List[torch.Tensor]] = []
+        self._seen_tokens = 0
+
+    def __len__(self):
+        return len(self.key_cache)
+
+    def __iter__(self):
+        for layer_idx in range(len(self)):
+            yield (tuple(self.key_cache[layer_idx]),tuple(self.value_cache[layer_idx]))
+
+    def __getitem__(self, layer_idx: int) -> Tuple[Tuple[torch.Tensor],Tuple[torch.Tensor]]:
+        if layer_idx < len(self):
+            return (tuple(self.key_cache[layer_idx]),tuple(self.value_cache[layer_idx]))
+        else:
+            raise KeyError(f"Cache only has {len(self)} layers, attempted to access layer with index {layer_idx}")
+
+    def update(
+        self,
+        key_states: List[torch.Tensor],
+        value_states: List[torch.Tensor],
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Tuple[torch.Tensor,...],Tuple[torch.Tensor,...]]:
+        if layer_idx == 0:
+            self._seen_tokens += max(map(lambda states: states.shape[-2], key_states))
+
+        if len(self.key_cache)<=layer_idx:
+            self.key_cache.append(list(key_states))
+            self.value_cache.append(list(value_states))
+        else:
+            # tensor shape[ [bsz, seq, dim] * head_nums]
+            # [bsz,\sum seq,dim]
+            # [bsz,\sum seq+headnum,dim ]
+            for head_idx in range(len(key_states)):
+                self.key_cache[layer_idx][head_idx] = torch.cat([self.key_cache[layer_idx][head_idx],key_states[head_idx]], dim=-2)
+                self.value_cache[layer_idx][head_idx] = torch.cat([self.value_cache[layer_idx][head_idx],value_states[head_idx]], dim=-2)
+        return tuple(self.key_cache[layer_idx]), tuple(self.value_cache[layer_idx])
+
+    def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
+        if len(self.key_cache) <= layer_idx:
+            return 0
+        return max(map(lambda states: states.shape[-2], self.key_cache[layer_idx]))
+
+    def get_max_length(self) -> Optional[int]:
+        return None
+
+
+    # Tuple[Tuple[Tuple[torch.Tensor,...],Tuple[torch.Tensor,...]],...]
+    def to_legacy_cache(self)-> Tuple[Tuple[Tuple[torch.Tensor,...],Tuple[torch.Tensor,...]],...]:
+        """Converts the `DynamicCache` instance into the its equivalent in the legacy cache format."""
+        legacy_cache = ()
+        for layer_idx in range(len(self)):
+            legacy_cache += ((tuple(self.key_cache[layer_idx]), tuple(self.value_cache[layer_idx])),)
+        return legacy_cache
+    @classmethod
+    def from_legacy_cache(cls,past_key_values:Optional[ Tuple[Tuple[Tuple[torch.Tensor,...],Tuple[torch.Tensor,...]],...]]=None)->"DynamicCacheEachHead":
+        cache = cls()
+        if past_key_values is not None:
+            for layer_idx in range(len(past_key_values)):
+                key_states,value_states = past_key_values[layer_idx]
+                cache.update(list(key_states),list(value_states),layer_idx)
+        return cache
+
+
 
 # Copied from transformers.models.llama.modeling_llama.repeat_kv
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -87,6 +240,14 @@ class AdaptiveSnapKVCluster():
         self.pyram_beta = pyram_beta
         self.layer_idx = layer_idx
         self.num_hidden_layers = num_hidden_layers
+
+        # TODO: unused
+        # TODO: layer-wise k_lens
+        self.layer_klens = None
+        self.max_seqlen_k = 0
+        self.klen_sum = 0
+        self.cu_klen = 0
+        self.cu_offset = None
 
 
     def calcul_attn_sore(self, key_states, query_states):
@@ -187,8 +348,22 @@ class AdaptiveSnapKVCluster():
         heads_value_states = []
         assert bsz == 1
         # per head
+
+        # reinit varlen metadata
+        k_lens = []
+        klen_sum = 0
+        self.max_seqlen_k = 0
+        self.cu_klen = 0
+
+
         for head_idx in range(num_heads):
             cache_index = sorted_attn_score_indices[head_idx][...,:head_adaptive_capacity[0][head_idx]]
+
+            l = cache_index.shape[-1] + self.window_size
+            k_lens.append(l)
+            self.max_seqlen_k = max(self.max_seqlen_k, l)
+            klen_sum += l
+
             cache_index = cache_index.view(1, 1, -1, 1).expand(-1, -1, -1, head_dim)
             top_Kcache = origin_heads_key_states[head_idx].gather(dim=2,index=cache_index)
             top_Vcache = origin_heads_value_states[head_idx].gather(dim=2,index=cache_index)
@@ -196,6 +371,22 @@ class AdaptiveSnapKVCluster():
             selected_v = torch.cat([top_Vcache,origin_heads_value_states[head_idx][:, :, -self.window_size:, :]],dim=2)
             heads_key_states.append(selected_k)
             heads_value_states.append(selected_v)
+
+        self.layer_klens = torch.tensor(k_lens, dtype=torch.int32, device=_device)
+        self.klen_sum = klen_sum
+        self.cu_klen = torch.cumsum(self.layer_klens, dim=0, dtype=torch.int32) - self.layer_klens
+        self.cu_klen = torch.cat(
+            [self.cu_klen, torch.tensor([self.klen_sum], dtype=torch.int32, device=_device)], dim=0)
+
+
+        self.layer_qlens = torch.ones(num_heads, dtype=torch.int32,device=_device)
+        self.qlen_sum = num_heads
+        self.cu_qlen = torch.cumsum(self.layer_qlens, dim=0, dtype=torch.int32) - self.layer_qlens
+        self.cu_qlen = torch.cat(
+            [self.cu_qlen, torch.tensor([self.qlen_sum], dtype=torch.int32, device=_device)], dim=0)
+
+        self.cu_offset = torch.arange(0, num_heads + 1, dtype=torch.int32, device=_device)
+
         return heads_key_states,heads_value_states
 
 
@@ -237,7 +428,7 @@ def init_adaptive_snapkv(self):
             pyram_beta = self.config.pyram_beta,
             )
 
-    print(f"Compress config: window_size={self.kv_cluster.window_size}, base_capacity={self.kv_cluster.base_capacity}, kernel_size={self.kv_cluster.kernel_size}, pooling={self.kv_cluster.pooling}, floor={self.kv_cluster.floor_ratio}, pyram_mode={self.kv_cluster.pyram_mode}, beta={self.kv_cluster.pyram_beta}")
+        print(f"Compress config: window_size={self.kv_cluster.window_size}, base_capacity={self.kv_cluster.base_capacity}, kernel_size={self.kv_cluster.kernel_size}, pooling={self.kv_cluster.pooling}, floor={self.kv_cluster.floor_ratio}, pyram_mode={self.kv_cluster.pyram_mode}, beta={self.kv_cluster.pyram_beta}")
 
 
 

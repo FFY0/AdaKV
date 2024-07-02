@@ -20,7 +20,7 @@ from transformers.utils import (
     logging,
     is_flash_attn_2_available,
 )
-from adaptive_snapkv.monkeypatch.snapkv_utils import init_snapkv, init_adaptive_snapkv
+from adaptive_snapkv.monkeypatch.snapkv_utils import init_snapkv, init_adaptive_snapkv, DynamicCacheSplitHead, DynamicCacheSplitHeadFlatten
 
 logger = logging.get_logger(__name__)
 
@@ -28,76 +28,6 @@ if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
     _flash_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
-
-
-
-class DynamicCacheSplitHead(Cache):
-    def __init__(self) ->None:
-        # Token wise List[]  Head wise KV List[torch.Tensor]
-        super().__init__()
-        self.key_cache: List[List[torch.Tensor]] = []
-        self.value_cache: List[List[torch.Tensor]] = []
-        self._seen_tokens = 0
-
-    def __len__(self):
-        return len(self.key_cache)
-
-    def __iter__(self):
-        for layer_idx in range(len(self)):
-            yield (tuple(self.key_cache[layer_idx]),tuple(self.value_cache[layer_idx]))
-
-    def __getitem__(self, layer_idx: int) -> Tuple[Tuple[torch.Tensor],Tuple[torch.Tensor]]:
-        if layer_idx < len(self):
-            return (tuple(self.key_cache[layer_idx]),tuple(self.value_cache[layer_idx]))
-        else:
-            raise KeyError(f"Cache only has {len(self)} layers, attempted to access layer with index {layer_idx}")
-
-    def update(
-        self,
-        key_states: List[torch.Tensor],
-        value_states: List[torch.Tensor],
-        layer_idx: int,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[Tuple[torch.Tensor,...],Tuple[torch.Tensor,...]]:
-        if layer_idx == 0:
-            self._seen_tokens += max(map(lambda states: states.shape[-2], key_states))
-
-        if len(self.key_cache)<=layer_idx:
-            self.key_cache.append(list(key_states))
-            self.value_cache.append(list(value_states))
-        else:
-            # tensor shape[ [bsz, seq, dim] * head_nums]
-            # [bsz,\sum seq,dim]
-            # [bsz,\sum seq+headnum,dim ]
-            for head_idx in range(len(key_states)):
-                self.key_cache[layer_idx][head_idx] = torch.cat([self.key_cache[layer_idx][head_idx],key_states[head_idx]], dim=-2)
-                self.value_cache[layer_idx][head_idx] = torch.cat([self.value_cache[layer_idx][head_idx],value_states[head_idx]], dim=-2)
-        return tuple(self.key_cache[layer_idx]), tuple(self.value_cache[layer_idx])
-
-    def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
-        if len(self.key_cache) <= layer_idx:
-            return 0
-        return max(map(lambda states: states.shape[-2], self.key_cache[layer_idx]))
-
-    def get_max_length(self) -> Optional[int]:
-        return None
-
-
-    # Tuple[Tuple[Tuple[torch.Tensor,...],Tuple[torch.Tensor,...]],...]
-    def to_legacy_cache(self)-> Tuple[Tuple[Tuple[torch.Tensor,...],Tuple[torch.Tensor,...]],...]:
-        """Converts the `DynamicCache` instance into the its equivalent in the legacy cache format."""
-        legacy_cache = ()
-        for layer_idx in range(len(self)):
-            legacy_cache += ((tuple(self.key_cache[layer_idx]), tuple(self.value_cache[layer_idx])),)
-        return legacy_cache
-    @classmethod
-    def from_legacy_cache(cls,past_key_values:Optional[ Tuple[Tuple[Tuple[torch.Tensor,...],Tuple[torch.Tensor,...]],...]]=None)->"DynamicCacheEachHead":
-        cache = cls()
-        if past_key_values is not None:
-            for layer_idx in range(len(past_key_values)):
-                key_states,value_states = past_key_values[layer_idx]
-                cache.update(list(key_states),list(value_states),layer_idx)
-        return cache
 
 
 def adaptive_MistralModel_forward(
@@ -145,7 +75,9 @@ def adaptive_MistralModel_forward(
     if use_cache:
         use_legacy_cache = not isinstance(past_key_values, Cache)
         if use_legacy_cache: # Adaptive Cache
-            past_key_values = DynamicCacheSplitHead.from_legacy_cache(past_key_values)
+            # past_key_values = DynamicCacheSplitHead.from_legacy_cache(past_key_values)
+            # TODO: review
+            past_key_values = DynamicCacheSplitHeadFlatten.from_legacy_cache(past_key_values)
         past_key_values_length = past_key_values.get_usable_length(seq_length)
 
     if position_ids is None:
@@ -360,7 +292,25 @@ def adaptive_mistral_flash_attn2_forward(
         if key_states.shape[-2] == kv_seq_len: # [SnapKV] add kv_cluster
             self.kv_seq_len = kv_seq_len
             key_states_compress, value_states_compress = self.kv_cluster.update_kv(key_states, query_states, value_states)
-            past_key_value.update(key_states_compress, value_states_compress, self.layer_idx, cache_kwargs)
+            # past_key_value.update(key_states_compress, value_states_compress, self.layer_idx, cache_kwargs)
+
+            # TODO: flatten view during update_kv
+            flat_k = []
+            flat_v = []
+            head_lens = []
+            for k, v in zip(key_states_compress, value_states_compress):
+                assert k.shape == v.shape
+                k = k.view(-1, self.head_dim)
+                v = v.view(-1, self.head_dim)
+                flat_k.append(k)
+                flat_v.append(v)
+                head_lens.append(k.size(0))
+
+            flat_k = torch.cat(flat_k, dim=0)
+            flat_v = torch.cat(flat_v, dim=0)
+
+            self.kv_cluster.head_lens = torch.tensor(head_lens, dtype=torch.int32, device=flat_k.device)
+            past_key_value.update(flat_k, flat_v, self.layer_idx, cache_kwargs)
 
             input_dtype = query_states.dtype
             if input_dtype == torch.float32:
@@ -396,53 +346,25 @@ def adaptive_mistral_flash_attn2_forward(
 
         else:
             self.kv_seq_len += q_len
-            key_states = torch.split(key_states, 1, dim=1)
-            value_states = torch.split(value_states, 1, dim=1)
+
+            cache_kwargs["head_lens"] = self.kv_cluster.head_lens.tolist()
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-            # varied length flash attn
+            # NOTE: update head_len
+            self.kv_cluster.head_lens += 1
+            self.kv_cluster.layer_klens += 1
+
+            self.kv_cluster.klen_sum += self.num_heads
+            self.kv_cluster.max_seqlen_k += 1
+            self.kv_cluster.cu_klen += self.kv_cluster.cu_offset
+
             _query_states = query_states.view(-1, 1, self.head_dim)
-            # flatten_key_states = []
-            # flatten_value_states = []
-            q_lens = []
-            q_len_sum = 0
-            k_lens = []
-            k_len_sum = 0
-            for head_idx in range(self.num_heads):
-                # NOTE: key_states[head_idx].shape = [bs, 1, seqlen_hi, dim]
-                # NOTE: value_states[head_idx].shape = [bs, 1, seqlen_hi, dim]
-                k_len = key_states[head_idx].size(2)
-                # _, _, v_len, _ = value_states[head_idx].shape
-                # assert k_len == v_len
-                q_lens.append(q_len)
-                q_len_sum += q_len
-                k_lens.append(k_len)
-                k_len_sum += k_len
-                # flatten_key_states.append(key_states[head_idx].view(-1, 1, self.head_dim))
-                # flatten_value_states.append(value_states[head_idx].view(-1, 1, self.head_dim))
+            _key_states = key_states.view(-1,1,self.head_dim)
+            _value_states = value_states.view(-1,1,self.head_dim)
 
-            # TODO: single batch only for now
-            assert bsz == 1
-            # NOTE: _key_states.shape = [k_len, head_num * bsz, dim]
-            # _key_states = torch.cat(flatten_key_states, dim=0).reshape(-1, 1, self.head_dim)
-            # _value_states = torch.cat(flatten_value_states, dim=0).reshape(-1, 1, self.head_dim)
-
-            _key_states = torch.cat(key_states,dim=2).view(-1,1,self.head_dim)
-            _value_states = torch.cat(value_states,dim=2).view(-1,1,self.head_dim)
-
-            # key_equal = torch.allclose(_key_states,__key_states)
-            # value_equal = torch.allclose(_value_states,__value_states)
-            q_lens = torch.tensor(q_lens, dtype=torch.int32,device=_query_states.device)
-            k_lens = torch.tensor(k_lens, dtype=torch.int32,device=_query_states.device)
-
-            cu_seqlens_q = torch.cumsum(q_lens, dim=0, dtype=torch.int32) - q_lens
-            cu_seqlens_q = torch.cat(
-                [cu_seqlens_q, torch.tensor([q_len_sum], dtype=torch.int32, device=_query_states.device)], dim=0)
-
-            cu_seqlens_k = torch.cumsum(k_lens, dim=0, dtype=torch.int32) - k_lens
-            cu_seqlens_k = torch.cat([cu_seqlens_k, torch.tensor([k_len_sum], dtype=torch.int32, device=_query_states.device)], dim=0)
-
-            max_seqlen_q = max(q_lens)
-            max_seqlen_k = max(k_lens)
+            cu_seqlens_q = self.kv_cluster.cu_qlen
+            cu_seqlens_k = self.kv_cluster.cu_klen
+            max_seqlen_q = 1
+            max_seqlen_k = self.kv_cluster.max_seqlen_k
 
             attn_output = flash_attn_varlen_func(_query_states, _key_states, _value_states, cu_seqlens_q,
                                                  cu_seqlens_k, max_seqlen_q, max_seqlen_k, causal=True).reshape(
