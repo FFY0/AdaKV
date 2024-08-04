@@ -20,9 +20,8 @@ def parse_args(args=None):
     parser.add_argument('--max_length', type=int, required=True)
     parser.add_argument('--e', action='store_true', help="Evaluate on LongBench-E")
     parser.add_argument("-d", '--dataset', type=str, default="THUDM/LongBench")
-
     parser.add_argument("--out_name", type=str, required=True)
-
+    parser.add_argument("--skip",type=int, default=0, help="skip layer number")
     parser.add_argument('--compress_args_path', type=str, default=None, help="Path to the compress args")
     # parser.add_argument('--adaptive', action='store_true', help="Use adaptive budgets allocation across heads")
     parser.add_argument('--mode', type=str, choices=['ada', 'fix', 'base'], help="Ada mode, fix mode or normal")
@@ -151,7 +150,7 @@ if __name__ == '__main__':
         datasets = ["qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "gov_report", "multi_news", \
             "trec", "triviaqa", "samsum", "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
     else:
-        datasets = ["narrativeqa", "qasper", "multifieldqa_en", "multifieldqa_zh", "hotpotqa", "2wikimqa", "musique", \
+        datasets = ["qasper","narrativeqa", "multifieldqa_en", "multifieldqa_zh", "hotpotqa", "2wikimqa", "musique", \
                     "dureader", "gov_report", "qmsum", "multi_news", "vcsum", "trec", "triviaqa", "samsum", "lsht", \
                     "passage_count", "passage_retrieval_en", "passage_retrieval_zh", "lcc", "repobench-p"]
 
@@ -171,8 +170,8 @@ if __name__ == '__main__':
         compress_args['floor_alpha'] = args.floor_alpha
         compress_args['normalize'] = args.normalize
         compress_args['pyram_mode']= args.pyram
+        compress_args['skip'] = args.skip
         compress_args['pyram_beta'] = args.pyram_beta
-
         compress = True
         # if args.adaptive:
         if args.mode == "ada":
@@ -188,18 +187,18 @@ if __name__ == '__main__':
     else:
         print("Base mode")
 
-    def config_compress(model, window_size=32, base_capacity=512, kernel_size=7, pooling="maxpool", floor_alpha=0.5, pyram_mode = False, pyram_beta = 20, normalize=True):
+    def config_compress(model, window_size=32, base_capacity=512, kernel_size=7, pooling="maxpool", floor_alpha=0.5, pyram_mode = False, pyram_beta = 20, normalize=True,skip=0):
         model.model.config.window_size = window_size
         model.model.config.base_capacity = base_capacity
         model.model.config.kernel_size = kernel_size
 
-        model.model.config.skip = 0
         model.model.config.normalize = normalize
         model.model.config.pooling = pooling
         model.model.config.floor_alpha = floor_alpha
 
         model.model.config.pyram_mode = pyram_mode
         model.model.config.pyram_beta = pyram_beta
+        model.model.config.skip = skip
         return model
 
     # NOTE: load model after replace
@@ -208,6 +207,7 @@ if __name__ == '__main__':
     if args.compress_args_path:
         model = config_compress(model, **compress_args)
 
+    args.out_name = f"{args.out_name}_skipnums_{args.skip}"
     for dataset in datasets:
         if args.e:
             data = load_dataset(args.dataset, f"{dataset}_e", split='test', data_dir=f"{args.dataset}/data")
@@ -222,7 +222,6 @@ if __name__ == '__main__':
         prompt_format = dataset2prompt[dataset]
         max_gen = dataset2maxlen[dataset]
         data_all = [data_sample for data_sample in data]
-
         # TODO: hard code single process, which use all gpus
         torch.cuda.synchronize()
         t = time.time()

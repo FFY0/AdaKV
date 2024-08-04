@@ -7,7 +7,7 @@ import torch.nn as nn
 import math
 from typing import List, Optional, Tuple, Union, Any,Dict
 from transformers.cache_utils import Cache, DynamicCache
-
+from flash_attn import flash_attn_func
 # perform qk calculation and get indices
 # this version will not update in inference mode
 
@@ -191,6 +191,7 @@ class SnapKVCluster():
         self.layer_idx = layer_idx
         self.num_hidden_layers = num_hidden_layers
 
+
     def reset(self, window_size = 64, max_capacity_prompt = 256 + 64, kernel_size = 5, pooling = 'avgpool'):
         self.window_size = window_size
         self.max_capacity_prompt = max_capacity_prompt
@@ -251,6 +252,7 @@ class SnapKVCluster():
             key_states = torch.cat([k_past_compress, k_cur], dim = 2)
             value_states = torch.cat([v_past_compress, v_cur], dim = 2)
             return key_states, value_states
+   
 
 class AdaptiveSnapKVCluster():
     def __init__(self, window_size = 32, kernel_size = 7, pooling = 'maxpool',base_capacity=None,floor_alpha = None,skip = None,normalize=None, layer_idx = None, num_hidden_layers = None, pyram_mode = False, pyram_beta = 20):
@@ -261,7 +263,7 @@ class AdaptiveSnapKVCluster():
         self.floor_ratio = floor_alpha
         self.floor_capacity = int(self.base_capacity * self.floor_ratio)
         self.adaptive_capacity = self.base_capacity - self.floor_capacity
-        self.skip_layer_nums = skip
+        self.skip = skip
 
         self.normalize = normalize
         self.pyram_init = False
@@ -361,7 +363,7 @@ class AdaptiveSnapKVCluster():
         # if you need to weight the attn_score
         pass
         sorted_attn_score,sorted_attn_score_indices = attn_score.sort(dim=-1,descending=True)
-        if self.layer_idx >= self.skip_layer_nums:
+        if self.layer_idx >= self.skip:
             adaptive_attn_score = sorted_attn_score
             length = adaptive_attn_score.size(dim=-1)
             if self.normalize:
@@ -431,12 +433,13 @@ def init_snapkv(self):
             max_capacity_prompt = self.config.base_capacity,
             kernel_size = self.config.kernel_size,
             pooling = self.config.pooling,
-
             layer_idx = self.layer_idx,
             num_hidden_layers = self.config.num_hidden_layers,
             pyram_mode = self.config.pyram_mode,
             pyram_beta = self.config.pyram_beta,
             )
+        if len(self.config.skip) > 0:
+            warnings.warn("vanilla transformer should not enable skip",self.config.skip)
         print(f"Compress config(Snap): window_size={self.kv_cluster.window_size}, max_capacity_prompt={self.kv_cluster.max_capacity_prompt}, kernel_size={self.kv_cluster.kernel_size}, pooling={self.kv_cluster.pooling}, pyram_mode={self.kv_cluster.pyram_mode}, beta={self.kv_cluster.pyram_beta}")
 
 def init_adaptive_snapkv(self):
