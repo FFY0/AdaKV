@@ -1,6 +1,6 @@
 # AdaKV
 Adaptive Allocation across different attention heads based on their concentration degrees effectively improves budget utilization, thereby improving post-eviction generation quality.
-
+This example includes five KV cache elements with corresponding attention weights. Adaptive budget allocation, reallocating budgets from Head2/3 with sparse concentrations to the dispersed Head1, increases the aggregated weights of retained cache elements from 2.26 to 2.48 compared to Uniform Allocation. This adjustment closely correlates with a reduction in $L_1$ eviction loss. 
 <p align="center">
     <img src="./assets/images/main.png" width=70%/>
 </p>
