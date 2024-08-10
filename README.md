@@ -3,7 +3,8 @@ Adaptive Budget Allocation across different attention heads based on their conce
 <p align="center">
     <img src="./assets/images/main.png" width=70%/>
 </p>
-This example includes five KV cache elements with corresponding attention weights. Adaptive budget allocation, reallocating budgets from Head2/3 with sparse concentrations to the dispersed Head1, increases the aggregated weights of retained cache elements from 2.26 to 2.48 compared to Uniform Allocation. This adjustment closely correlates with a reduction in $L_1$ eviction loss. 
+This example includes five KV cache elements with corresponding attention weights. Adaptive budget allocation, reallocating budgets from Head2/3 with sparse concentrations to the dispersed Head1, increases the aggregated weights of retained cache elements from 2.26 to 2.48 compared to Uniform Allocation. This adjustment closely correlates with a reduction in eviction loss. 
+
 ## Usage
 
 ### Requirements
@@ -107,7 +108,7 @@ Details about flash_attn_varlen_func can be found in [`Repo`](https://github.com
 
 ##### Peak Memory Footprint and Decoding Latency For Our Implementation:
 <p align="center">
-<img src="./assets/images/mem.png" width=25%/>     <img src="./assets/images/speed.png" width=25%/>
+<img src="./assets/images/mem.png" width=30%/>     <img src="./assets/images/speed.png" width=30%/>
 </p>
 
 ## Evaluations
