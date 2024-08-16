@@ -19,7 +19,7 @@ echo "Testing $MODEL $DATASET $MAX_LEN"
 
 for scope in ${scopes[@]}; do
   # ada model
-  python pred.py -m $MODEL --max_length $MAX_LEN -d $DATASET --mode ada --compress_args_path c"$scope"_w32_k7_maxpool.json --floor_alpha 0.5 --out_name ada_"$scope"_"$MODEL_NAME" --skip 1 
+  python pred.py -m $MODEL --max_length $MAX_LEN -d $DATASET --mode ada --compress_args_path c"$scope"_w32_k7_maxpool.json --floor_alpha 0.5 --out_name ada_"$scope"_"$MODEL_NAME" 
   # snap model
   python pred.py -m $MODEL --max_length $MAX_LEN -d $DATASET --mode fix --compress_args_path c"$scope"_w32_k7_maxpool.json --out_name fix_"$scope"_"$MODEL_NAME"
   # ada pyram model
