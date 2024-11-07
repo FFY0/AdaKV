@@ -1,7 +1,5 @@
 from ast import arg
 import sys
-site_packages_path = "/home/ffy/miniconda3/envs/snapekv/lib/python3.12/site-packages/"
-sys.path.insert(0,site_packages_path)
 import os
 import site
 from datasets import load_dataset
