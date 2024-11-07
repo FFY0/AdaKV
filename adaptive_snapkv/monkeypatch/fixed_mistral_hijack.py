@@ -242,10 +242,7 @@ def fixed_mistral_flash_attn2_forward(
             "The current flash attention version does not support sliding window attention, for a more memory efficient implementation"
             " make sure to upgrade flash-attn library."
         )
-    # repeat k/v heads if n_kv_heads < n_heads
-    # [SnapKV] move to ahead
-    key_states = repeat_kv(key_states, self.num_key_value_groups)
-    value_states = repeat_kv(value_states, self.num_key_value_groups)
+
 
     if past_key_value is not None:
         # Activate slicing cache only if the config has a value `sliding_windows` attribute
@@ -278,12 +275,25 @@ def fixed_mistral_flash_attn2_forward(
             self.kv_seq_len = kv_seq_len
             key_states_compress, value_states_compress = self.kv_cluster.update_kv(key_states, query_states, value_states)
             past_key_value.update(key_states_compress, value_states_compress, self.layer_idx, cache_kwargs)
+            # test gqa
+            # print((key_states_compress.element_size() * key_states_compress.numel() + value_states_compress.element_size() * value_states_compress.numel())/ (1024 ** 3),"GB")
         else:
             self.kv_seq_len += q_len
+            # support gqa
+            if not self.kv_cluster.gqa_support:
+                    key_states = repeat_kv(key_states, self.num_key_value_groups)
+                    value_states = repeat_kv(value_states, self.num_key_value_groups)
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
+    # repeat k/v heads if n_kv_heads < n_heads
+    # [SnapKV] 
+    # support gqa
+    if self.kv_cluster.gqa_support:
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        value_states = repeat_kv(value_states, self.num_key_value_groups)
+    
     
     dropout_rate = 0.0 if not self.training else self.attention_dropout
 
