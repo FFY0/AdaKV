@@ -15,6 +15,28 @@ from metrics import (
     code_sim_score,
 )
 
+"""
+check the sample num of each dataset
+"""
+
+dataset_samples = {
+    "narrativeqa": 200,
+    "qasper":200,
+    "multifieldqa_en": 150,
+    "hotpotqa": 200,
+    "2wikimqa": 200,
+    "musique": 200,
+    "gov_report": 200,
+    "qmsum": 200,
+    "multi_news": 200,
+    "trec": 200,
+    "triviaqa": 200,
+    "samsum": 200,
+    "passage_retrieval_en": 200,
+    "passage_count": 200,
+    "lcc": 500,
+    "repobench-p": 500,
+}
 dataset2metric = {
     "narrativeqa": qa_f1_score,
     "qasper": qa_f1_score,
@@ -95,13 +117,20 @@ if __name__ == '__main__':
             predictions, answers, lengths = [], [], []
             dataset = filename.split('.')[0]
             with open(f"{path}{filename}", "r", encoding="utf-8") as f:
+                line_cnt = 0
                 for line in f:
+                    line_cnt += 1
                     data = json.loads(line)
                     predictions.append(data["pred"])
                     answers.append(data["answers"])
                     all_classes = data["all_classes"]
                     if "length" in data:
                         lengths.append(data["length"])
+                dataset_name = filename.split('.')[0]
+                target_samples = dataset_samples.get(dataset_name, 200)
+                if line_cnt != target_samples:
+                    print(f"Error: {dataset_name} has {line_cnt} samples, expected {target_samples}")
+                    continue
             if args.e:
                 score = scorer_e(dataset, predictions, answers, lengths, all_classes)
             else:

@@ -20,7 +20,7 @@ from transformers.utils import (
     logging,
     is_flash_attn_2_available,
 )
-from adaptive_snapkv.monkeypatch.snapkv_utils import init_snapkv, init_adaptive_snapkv, DynamicCacheSplitHead, DynamicCacheSplitHeadFlatten
+from adaptive_snapkv.monkeypatch.snapkv_utils import init_snapkv, init_adaptive_snapkv, DynamicCacheSplitHeadFlatten
 
 logger = logging.get_logger(__name__)
 
@@ -250,10 +250,7 @@ def adaptive_mistral_flash_attn2_forward(
             "The current flash attention version does not support sliding window attention, for a more memory efficient implementation"
             " make sure to upgrade flash-attn library."
         )
-    # repeat k/v heads if n_kv_heads < n_heads
-    # [SnapKV] move to ahead
-    key_states = repeat_kv(key_states, self.num_key_value_groups)
-    value_states = repeat_kv(value_states, self.num_key_value_groups)
+
 
     if past_key_value is not None:
         # Activate slicing cache only if the config has a value `sliding_windows` attribute
@@ -288,6 +285,10 @@ def adaptive_mistral_flash_attn2_forward(
             key_states_compress, value_states_compress = self.kv_cluster.update_kv(key_states, query_states, value_states)
             past_key_value.update(key_states_compress, value_states_compress, self.layer_idx, cache_kwargs)
 
+            # repeat k/v heads if n_kv_heads < n_heads
+            # [SnapKV] move to ahead
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
             input_dtype = query_states.dtype
             if input_dtype == torch.float32:
                 # Handle the case where the model is quantized
@@ -321,10 +322,15 @@ def adaptive_mistral_flash_attn2_forward(
             attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
 
         else:
+            # Ada-KV: computation for var-len KV cache in diff heads
             self.kv_seq_len += q_len
 
             cache_kwargs["head_lens"] = self.kv_cluster.head_lens
             cache_kwargs["cu_klen"] = self.kv_cluster.cu_klen
+            # gqa_support
+            if not self.kv_cluster.gqa_support:
+                key_states = repeat_kv(key_states, self.num_key_value_groups)
+                value_states = repeat_kv(value_states, self.num_key_value_groups)
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
             # NOTE: update meta data
@@ -332,8 +338,11 @@ def adaptive_mistral_flash_attn2_forward(
             self.kv_cluster.max_seqlen_k += 1
             self.kv_cluster.cu_klen += self.kv_cluster.cu_offset
             self.kv_cluster.head_lens += 1
+            if self.kv_cluster.gqa_support:
+                query_states = query_states.view(-1, self.num_key_value_groups, self.head_dim)
+            else:
+                query_states = query_states.view(-1, 1, self.head_dim)
 
-            query_states = query_states.view(-1, 1, self.head_dim)
             key_states = key_states.view(-1,1,self.head_dim)
             value_states = value_states.view(-1,1,self.head_dim)
 
@@ -343,9 +352,11 @@ def adaptive_mistral_flash_attn2_forward(
             max_seqlen_k = self.kv_cluster.max_seqlen_k
 
             attn_output = flash_attn_varlen_func(query_states, key_states, value_states, cu_seqlens_q,
-                                                 cu_seqlens_k, max_seqlen_q, max_seqlen_k, causal=True).reshape(
-                bsz, self.num_heads, q_len, self.head_dim)
-            attn_output = attn_output.transpose(0, 1).reshape(bsz, q_len, self.hidden_size)
+                                                 cu_seqlens_k, max_seqlen_q, max_seqlen_k, causal=True)
+            #  TODO: support batch size > 1
+            assert bsz == 1
+            attn_output = attn_output.reshape(bsz, self.num_heads, q_len, self.head_dim)
+            attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, self.hidden_size)
 
     attn_output = self.o_proj(attn_output)
 

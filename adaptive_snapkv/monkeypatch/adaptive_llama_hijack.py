@@ -24,7 +24,7 @@ from transformers.models.llama.modeling_llama import (
     repeat_kv,
 )
 
-from adaptive_snapkv.monkeypatch.snapkv_utils import init_adaptive_snapkv, DynamicCacheSplitHead, DynamicCacheSplitHeadFlatten
+from adaptive_snapkv.monkeypatch.snapkv_utils import init_adaptive_snapkv, DynamicCacheSplitHeadFlatten
 
 logger = logging.get_logger(__name__)
 
