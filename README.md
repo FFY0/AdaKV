@@ -5,8 +5,9 @@ Adaptive Budget Allocation across different attention heads based on their conce
 </p>
 This example includes five KV cache elements with corresponding attention weights. Adaptive budget allocation, reallocating budgets from Head2/3 with sparse concentrations to the dispersed Head1, increases the aggregated weights of retained cache elements from 2.26 to 2.48 compared to Uniform Allocation. This adjustment closely correlates with a reduction in eviction loss. 
 
-## 2024/11/3 Upcoming Update: GQA Support 
-Thank you for your continued interest in the Ada-KV project! We have recently received numerous requests from researchers to add support for Grouped Query Attention (GQA). This feature is currently in development, and we expect to release a test branch soon. Following compatibility testing, GQA support will be merged into the main branch.
+## Updates
+* __[2024.11.08 GQA Support]__ In response to numerous community requests, we’ve just uploaded a new testing branch, named `test_gqa_support`, which introduces support for Grouped Query Attention (GQA) under the methods "SnapKV," "PyramidKV," "Ada-SnapKV," and "Ada-PyramidKV."  You can use the `GQA_eval_longbench.sh` script for direct evaluation on the LongBench benchmark. Detailed results will be released soon.
+
 
 ## Usage
 
