@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools", "wheel", "packaging"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adaptive_snapkv"
+version = "0.0.1"
+
+dependencies = [
+    "rouge",
+    "tokenizers",
+    "rouge_score",
+    "numpy==1.26.4",
+    "jieba==0.42.1",
+    "datasets==2.14.5",
+    "accelerate==0.23.0",
+    "tqdm==4.66.1",
+    "icetk==0.0.7",
+    "tiktoken==0.5.1",
+    "torch==2.4.0",
+    "transformers==4.44.2",
+    "sentencepiece==0.1.99",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]

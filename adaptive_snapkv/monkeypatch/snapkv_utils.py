@@ -50,17 +50,12 @@ class DynamicCacheSplitHeadFlatten(Cache):
             head_lens = cache_kwargs["head_lens"]
             cu_klen = cache_kwargs["cu_klen"]
 
-            import nvtx
-            copy_old_rng = nvtx.start_range("copy old")
-
             # TODO: wrap as a python interface
             from tiny_api_cuda import update_flatten_view
             new_key_cache = update_flatten_view(self.key_cache[layer_idx].view(-1,dim), key_states.view(-1, dim), head_lens, cu_klen)
             new_value_cache = update_flatten_view(self.value_cache[layer_idx].view(-1,dim), value_states.view(-1, dim), head_lens, cu_klen)
 
             # torch.cuda.synchronize()
-
-            nvtx.end_range(copy_old_rng)
 
             self.key_cache[layer_idx] = new_key_cache
             self.value_cache[layer_idx] = new_value_cache

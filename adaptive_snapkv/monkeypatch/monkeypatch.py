@@ -11,6 +11,26 @@ from adaptive_snapkv.monkeypatch.fixed_llama_hijack import fixed_llama_flash_att
 from adaptive_snapkv.monkeypatch.fixed_llama_hijack import prepare_inputs_for_generation_llama as fixed_prepare_inputs_for_generation_llama
 from adaptive_snapkv.monkeypatch.adaptive_llama_hijack import adaptive_llama_flash_attn2_forward,adaptive_LlamaModel_forward
 from adaptive_snapkv.monkeypatch.adaptive_llama_hijack import prepare_inputs_for_generation_llama as ada_prepare_inputs_for_generation_llama
+
+# config hyperparameters
+def config_compress(model, window_size=32, base_capacity=1024, kernel_size=7, pooling="maxpool", floor_alpha=0.5, pyram_mode = False, beta = 20, skip=0, normalize=None, gqa_support=True):
+    model.model.config.window_size = window_size
+    model.model.config.base_capacity = base_capacity
+    model.model.config.kernel_size = kernel_size
+
+    model.model.config.pooling = pooling
+    model.model.config.floor_alpha = floor_alpha
+    model.model.config.skip = skip
+
+    model.model.config.pyram_mode = pyram_mode
+    model.model.config.pyram_beta = beta
+
+    model.model.config.normalize = normalize
+    model.model.config.gqa_support = gqa_support
+
+    return model
+
+
 def check_version():
     try:
         transformers_version = version("transformers")
