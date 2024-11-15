@@ -7,7 +7,8 @@ This example includes five KV cache elements with corresponding attention weight
 
 ## Updates
 * __[2024.11.08 GQA Support]__ In response to numerous community requests, we’ve just uploaded a new testing branch, named `test_gqa_support`, which introduces support for Grouped Query Attention (GQA) under the methods "SnapKV," "PyramidKV," "Ada-SnapKV," and "Ada-PyramidKV."  You can use the `GQA_eval_longbench.sh` script for direct evaluation on the LongBench benchmark. Detailed results will be released soon.
-
+* __[2024.11.15 GQA Results]__ We have integrated GQA support for Mistral-7B-Instruct-v0.2 in SnapKV, PyramidKV, and our Ada-KV. You can try it by running the `GQA_eval_longbench.sh` script! Preliminary results on a single A800 are provided in the table below. In future updates, we will include more comprehensive GQA test results in the appendix of our [Ada-KV paper](arxiv.org/abs/2407.11550).
+![](./assets/images/LongBench_mistral_gqa.png)
 
 ## Usage
 
@@ -116,7 +117,7 @@ Details about flash_attn_varlen_func can be found in [`Repo`](https://github.com
 </p>
 
 ## Evaluations
-### LongBench
+### LongBench without GQA Support
 
 ![](./assets/images/LongBench_mistral.png)
 
