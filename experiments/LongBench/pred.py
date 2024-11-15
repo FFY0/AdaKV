@@ -1,7 +1,11 @@
+from ast import arg
+import sys
 import os
+import site
 from datasets import load_dataset
 import torch
 import json
+import transformers
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm import tqdm
 import numpy as np
@@ -11,8 +15,10 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import gc
 import time
-
+import adaptive_snapkv
 from adaptive_snapkv.monkeypatch.monkeypatch import  replace_mistral_fixed,replace_mistral_adaptive, replace_llama_adaptive, replace_llama_fixed
+
+# print('name_space_position:',adaptive_snapkv.__path__)
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser()
@@ -23,9 +29,9 @@ def parse_args(args=None):
     parser.add_argument("--out_name", type=str, required=True)
     parser.add_argument("--skip",type=int, default=0, help="skip layer number")
     parser.add_argument('--compress_args_path', type=str, default=None, help="Path to the compress args")
-    # parser.add_argument('--adaptive', action='store_true', help="Use adaptive budgets allocation across heads")
     parser.add_argument('--mode', type=str, choices=['ada', 'fix', 'base'], help="Ada mode, fix mode or normal")
-    parser.add_argument('--floor_alpha',type=float,help="floor_alpha budgets for each head")
+    parser.add_argument('--gqa_support',action='store_true', default=False, help="init gqa_support")
+    parser.add_argument('--floor_alpha',type=float,default=0.2,help="floor_alpha budgets for each head")
     parser.add_argument('--normalize',action='store_true')
     parser.add_argument('--pyram',action='store_true',help="using pyram mode")
     parser.add_argument('--pyram_beta',default=20,type=int, help="hyper parameter for pyram")
@@ -64,10 +70,13 @@ def post_process(response, model_name):
 
 def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset, device, model_name_or_path, out_path):
     device = "cuda"
+    json_data_list = []
     for json_obj in tqdm(data):
         prompt = prompt_format.format(**json_obj)
         # truncate to fit max_length (we suggest truncate in the middle, since the left and right side may contain crucial instructions)
         tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
+        
+
         if "chatglm3" in model_name_or_path:
             tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt", add_special_tokens=False).input_ids[0]
         if len(tokenized_prompt) > max_length:
@@ -104,12 +113,14 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset
             )[0]
         pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)
         pred = post_process(pred, model_name_or_path)
-        with open(out_path, "a", encoding="utf-8") as f:
-            json.dump({"pred": pred, "answers": json_obj["answers"], "all_classes": json_obj["all_classes"], "length": json_obj["length"]}, f, ensure_ascii=False)
-            f.write('\n')
-
+        json_data = {"pred": pred, "answers": json_obj["answers"], "all_classes": json_obj["all_classes"], "length": json_obj["length"]}
+        json_data_list.append(json_data)
         gc.collect()
         torch.cuda.empty_cache()
+    with open(out_path, "w", encoding="utf-8") as f:
+        for json_data in json_data_list:
+            json.dump(json_data, f, ensure_ascii=False)
+            f.write('\n')
 
 
 def seed_everything(seed):
@@ -126,6 +137,7 @@ def load_model_and_tokenizer(path):
                                               trust_remote_code=True,
                                               )
     model = AutoModelForCausalLM.from_pretrained(path,
+                                            #  torch_dtype=torch.bfloat16,
                                              torch_dtype=torch.bfloat16,
                                              # TODO: hard code
                                              device_map="auto",
@@ -150,10 +162,9 @@ if __name__ == '__main__':
         datasets = ["qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "gov_report", "multi_news", \
             "trec", "triviaqa", "samsum", "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
     else:
-        datasets = ["qasper","narrativeqa", "multifieldqa_en", "multifieldqa_zh", "hotpotqa", "2wikimqa", "musique", \
-                    "dureader", "gov_report", "qmsum", "multi_news", "vcsum", "trec", "triviaqa", "samsum", "lsht", \
-                    "passage_count", "passage_retrieval_en", "passage_retrieval_zh", "lcc", "repobench-p"]
-
+        datasets = ["qasper","multi_news","narrativeqa", "multifieldqa_en", "hotpotqa", "2wikimqa", "musique", \
+                    "gov_report", "qmsum",   "trec", "triviaqa", "samsum",  \
+                    "passage_count", "passage_retrieval_en",  "lcc", "repobench-p"]
     # we design specific prompt format and max generation length for each task, feel free to modify them to optimize model output
     dataset2prompt = json.load(open("config/dataset2prompt.json", "r"))
     dataset2maxlen = json.load(open("config/dataset2maxlen.json", "r"))
@@ -168,6 +179,7 @@ if __name__ == '__main__':
     if args.compress_args_path:
         compress_args = json.load(open(os.path.join('config', args.compress_args_path), "r"))
         compress_args['floor_alpha'] = args.floor_alpha
+        compress_args['gqa_support'] = args.gqa_support
         compress_args['normalize'] = args.normalize
         compress_args['pyram_mode']= args.pyram
         compress_args['skip'] = args.skip
@@ -187,7 +199,7 @@ if __name__ == '__main__':
     else:
         print("Base mode")
 
-    def config_compress(model, window_size=32, base_capacity=512, kernel_size=7, pooling="maxpool", floor_alpha=0.5, pyram_mode = False, pyram_beta = 20, normalize=True,skip=0):
+    def config_compress(model, window_size=32, base_capacity=512, kernel_size=7, pooling="maxpool", floor_alpha=0.5, pyram_mode = False, pyram_beta = 20, normalize=True, skip=0, gqa_support=False):
         model.model.config.window_size = window_size
         model.model.config.base_capacity = base_capacity
         model.model.config.kernel_size = kernel_size
@@ -199,15 +211,26 @@ if __name__ == '__main__':
         model.model.config.pyram_mode = pyram_mode
         model.model.config.pyram_beta = pyram_beta
         model.model.config.skip = skip
+        model.model.config.gqa_support = gqa_support
         return model
 
     # NOTE: load model after replace
     model, tokenizer = load_model_and_tokenizer(model_name_or_path)
 
+
     if args.compress_args_path:
         model = config_compress(model, **compress_args)
+    if args.mode == "fix":
+        if args.gqa_support:
+            args.out_name = f"{args.out_name}_gqa_support_{args.gqa_support}"
+        else:
+            args.out_name = f"{args.out_name}"
+    else:
+        if args.gqa_support: 
+            args.out_name = f"{args.out_name}_alpha_{args.floor_alpha}_gqa_support_{args.gqa_support}"
+        else:
+            args.out_name = f"{args.out_name}_alpha_{args.floor_alpha}"
 
-    args.out_name = f"{args.out_name}_skipnums_{args.skip}"
     for dataset in datasets:
         if args.e:
             data = load_dataset(args.dataset, f"{dataset}_e", split='test', data_dir=f"{args.dataset}/data")
@@ -219,6 +242,10 @@ if __name__ == '__main__':
             if not os.path.exists(f"pred/{args.out_name}"):
                 os.makedirs(f"pred/{args.out_name}")
             out_path = f"pred/{args.out_name}/{dataset}.jsonl"
+            # auto skip the existing datasets   
+            if os.path.exists(out_path):
+                print(f"== {args.out_name} {dataset} already exists, skip this datasets")
+                continue
         prompt_format = dataset2prompt[dataset]
         max_gen = dataset2maxlen[dataset]
         data_all = [data_sample for data_sample in data]

@@ -165,5 +165,7 @@ experiments/LongBench/bak/buggy
 experiments/LongBench/archive
 experiments/LongBench/ignore
 experiments/LongBench/Log
+experiments/LongBench/*pred
+experiments/LongBench/runall_*.sh
 .vscode
 .idea
