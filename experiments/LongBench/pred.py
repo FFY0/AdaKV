@@ -156,6 +156,10 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model_name_or_path = args.model_name_or_path
     model_name = args.model_name_or_path.split("/")[-1]
+    # check gqa_support for model
+    if args.gqa_support:
+        assert "mistral" in model_name.lower(), "Currently, GQA support is only available for the Mistral model. Support for LLama models will be included in future updates. "
+        
     # define your model
     max_length = args.max_length
     if args.e:
