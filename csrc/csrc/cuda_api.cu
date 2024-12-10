@@ -39,7 +39,7 @@ __global__ void update_flatten_view_kernel(tensor_t* dst_ptr, tensor_t* src_ptr,
         #pragma unroll
         for (int i = 0; i < kblock_size; i++) {
             if (start_addr + tid * kblock_size + i >= headlen * dim) {
-                return;
+                break;
             }
             dst_addr[i] = src_addr[i];
         }

@@ -169,3 +169,6 @@ experiments/LongBench/*pred
 experiments/LongBench/runall_*.sh
 .vscode
 .idea
+ignore/
+experiments/LongBench/pred_a1
+experiments/LongBench/pred_gqa

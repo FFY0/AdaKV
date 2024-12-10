@@ -50,17 +50,12 @@ class DynamicCacheSplitHeadFlatten(Cache):
             head_lens = cache_kwargs["head_lens"]
             cu_klen = cache_kwargs["cu_klen"]
 
-            import nvtx
-            copy_old_rng = nvtx.start_range("copy old")
-
             # TODO: wrap as a python interface
             from tiny_api_cuda import update_flatten_view
             new_key_cache = update_flatten_view(self.key_cache[layer_idx].view(-1,dim), key_states.view(-1, dim), head_lens, cu_klen)
             new_value_cache = update_flatten_view(self.value_cache[layer_idx].view(-1,dim), value_states.view(-1, dim), head_lens, cu_klen)
 
             # torch.cuda.synchronize()
-
-            nvtx.end_range(copy_old_rng)
 
             self.key_cache[layer_idx] = new_key_cache
             self.value_cache[layer_idx] = new_value_cache
@@ -243,7 +238,7 @@ class SnapKVCluster():
 
             self.max_capacity_prompt = max_num - self.layer_idx * steps + self.window_size
             self.pyram_init = True
-            print(f"Pyram mode adaptive capacity, layer: {self.layer_idx}, max_capacity_prompt: {self.max_capacity_prompt}, base_capacity: {self.max_capacity_prompt - self.window_size}")
+            print(f"Pyram mode adaptive capacity, layer: {self.layer_idx}, max_capacity_prompt: {self.max_capacity_prompt}, base_capacity: {self.max_capacity_prompt - self.window_size}", flush=True)
 
         if q_len < self.max_capacity_prompt:
             # support gqa
@@ -342,6 +337,8 @@ class AdaptiveSnapKVCluster():
         bsz, num_heads, q_len, head_dim = query_states.shape
         attn_weights = torch.matmul(query_states[..., -self.window_size:, :], key_states.transpose(2, 3)) / math.sqrt(
             head_dim)
+        
+
         mask = torch.full((self.window_size, self.window_size), torch.finfo(attn_weights.dtype).min,
                           device=attn_weights.device)
         mask_cond = torch.arange(mask.size(-1), device=attn_weights.device)
@@ -413,7 +410,7 @@ class AdaptiveSnapKVCluster():
             self.floor_capacity = int(self.base_capacity * self.floor_ratio)
             self.adaptive_capacity = self.base_capacity - self.floor_capacity
             self.pyram_init = True
-            print(f"Pyram mode adaptive capacity, layer: {self.layer_idx}, acap: {self.adaptive_capacity}, bcap: {self.base_capacity}, fcap: {self.floor_capacity}")
+            print(f"Pyram mode adaptive capacity, layer: {self.layer_idx}, acap: {self.adaptive_capacity}, bcap: {self.base_capacity}, fcap: {self.floor_capacity}",  flush=True)
 
         def init_metadata(num_heads, k_lens, klen_sum, max_seqlen_k):
             # init metadata
@@ -514,6 +511,7 @@ class AdaptiveSnapKVCluster():
         key_states = repeat_kv(origin_key_states, self.num_key_value_groups)
         value_states = repeat_kv(origin_value_states, self.num_key_value_groups)
 
+
         # check if prefix phase        assert key_states.shape[-2] == query_states.shape[-2]
         _device = key_states.device
         bsz, num_heads, q_len, head_dim = query_states.shape
@@ -540,7 +538,7 @@ class AdaptiveSnapKVCluster():
             self.floor_capacity = int(self.base_capacity * self.floor_ratio)
             self.adaptive_capacity = self.base_capacity - self.floor_capacity
             self.pyram_init = True
-            print(f"Pyram mode adaptive capacity, layer: {self.layer_idx}, acap: {self.adaptive_capacity}, bcap: {self.base_capacity}, fcap: {self.floor_capacity}")
+            print(f"Pyram mode adaptive capacity, layer: {self.layer_idx}, acap: {self.adaptive_capacity}, bcap: {self.base_capacity}, fcap: {self.floor_capacity}",  flush=True)
 
         def init_metadata(num_heads, k_lens, klen_sum, max_seqlen_k):
             # init metadata
@@ -651,7 +649,7 @@ def init_snapkv(self):
                 warnings.warn("GQA currently supports only for mistral-7B-v0.2 model")
         # if len(self.config.skip) > 0:
         #     warnings.warn("vanilla transformer should not enable skip",self.config.skip)
-        # print(f"Compress config(Snap): window_size={self.kv_cluster.window_size}, max_capacity_prompt={self.kv_cluster.max_capacity_prompt}, kernel_size={self.kv_cluster.kernel_size}, pooling={self.kv_cluster.pooling}, pyram_mode={self.kv_cluster.pyram_mode}, beta={self.kv_cluster.pyram_beta}")
+        print(f"Compress config(Snap): window_size={self.kv_cluster.window_size}, max_capacity_prompt={self.kv_cluster.max_capacity_prompt}, kernel_size={self.kv_cluster.kernel_size}, pooling={self.kv_cluster.pooling}, pyram_mode={self.kv_cluster.pyram_mode}, beta={self.kv_cluster.pyram_beta}",  flush=True)
 
 def init_adaptive_snapkv(self):
     assert hasattr(self.config,'window_size'),"window_size not set"
@@ -683,7 +681,46 @@ def init_adaptive_snapkv(self):
         if self.config.gqa_support:
             if self.config.model_type != "mistral":
                 warnings.warn("GQA currently supports only for mistral-7B-v0.2 model")
-        # print(f"Compress config(Ada): window_size={self.kv_cluster.window_size}, base_capacity={self.kv_cluster.base_capacity}, kernel_size={self.kv_cluster.kernel_size}, pooling={self.kv_cluster.pooling}, floor_alpha={self.kv_cluster.floor_ratio}, pyram_mode={self.kv_cluster.pyram_mode}, beta={self.kv_cluster.pyram_beta}")
+        print(f"Compress config(Ada): window_size={self.kv_cluster.window_size}, base_capacity={self.kv_cluster.base_capacity}, kernel_size={self.kv_cluster.kernel_size}, pooling={self.kv_cluster.pooling}, floor_alpha={self.kv_cluster.floor_ratio}, pyram_mode={self.kv_cluster.pyram_mode}, beta={self.kv_cluster.pyram_beta}", flush=True)
+
+
+
+class StreamingLLMKVCluster():
+    def __init__(self, max_capacity_prompt = 256):
+        self.max_capacity_prompt = max_capacity_prompt - 4
+        self.sink_token = 4
+        assert self.max_capacity_prompt - 4 > 0
+
+
+    def update_kv(self, key_states, query_states, value_states, *args, **kwargs):
+        # check if prefix phase
+        assert key_states.shape[-2] == query_states.shape[-2]
+        bsz, num_heads, q_len, head_dim = query_states.shape
+        
+        print(f"StreamingLLM max_capacity_prompt {self.max_capacity_prompt + 4}")
+        
+        if q_len < self.max_capacity_prompt + 4:
+            return key_states, value_states
+        else:
+            k_past_compress = key_states[:, :, :self.sink_token, :]
+            v_past_compress = value_states[:, :, :self.sink_token, :]
+            k_cur = key_states[:, :, -self.max_capacity_prompt:, :]
+            v_cur = value_states[:, :, -self.max_capacity_prompt:, :]
+            key_states = torch.cat([k_past_compress, k_cur], dim = 2)
+            value_states = torch.cat([v_past_compress, v_cur], dim = 2)
+            return key_states, value_states
+
+
+def init_slm(self,**kwargs):
+    assert hasattr(self.config, 'window_size'), "window_size not set"
+    # init only once
+    if not hasattr(self, "kv_cluster"):
+        self.kv_cluster = StreamingLLMKVCluster(
+            max_capacity_prompt = self.config.base_capacity,
+            )
+        print(f"Compress config(SLM): max_cap={self.config.base_capacity}")
+
+
 
 
 

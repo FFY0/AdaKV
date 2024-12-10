@@ -16,7 +16,7 @@ from transformers.utils import (
     logging,
     is_flash_attn_2_available,
 )
-from adaptive_snapkv.monkeypatch.snapkv_utils import init_snapkv
+from adaptive_snapkv.monkeypatch.snapkv_utils import init_slm
 from flash_attn import flash_attn_func
 
 logger = logging.get_logger(__name__)
@@ -26,7 +26,7 @@ if is_flash_attn_2_available():
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
     _flash_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
 
-def fixed_MistralModel_forward(
+def slm_MistralModel_forward(
     self,
     input_ids: torch.LongTensor = None,
     attention_mask: Optional[torch.Tensor] = None,
@@ -146,7 +146,7 @@ def fixed_MistralModel_forward(
         attentions=all_self_attns,
     )
 
-def fixed_mistral_flash_attn2_forward(
+def slm_mistral_flash_attn2_forward(
     self,
     hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
@@ -161,8 +161,7 @@ def fixed_mistral_flash_attn2_forward(
             "`static` cache implementation is not compatible with `attn_implementation==flash_attention_2` "
             "make sure to use `sdpa` in the mean time, and open an issue at https://github.com/huggingface/transformers"
         )
-    # [SnapKV] register kv_cluster
-    init_snapkv(self)
+    init_slm(self)
     output_attentions = False
 
     output_attentions = False
@@ -214,10 +213,6 @@ def fixed_mistral_flash_attn2_forward(
                 attention_mask = torch.cat([attention_mask, torch.ones_like(attention_mask[:, -1:])], dim=-1)
 
         if q_len == 1:
-            # support gqa
-            if not self.kv_cluster.gqa_support:
-                    key_states = repeat_kv(key_states, self.num_key_value_groups)
-                    value_states = repeat_kv(value_states, self.num_key_value_groups)
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
         else:
             key_states_compress, value_states_compress = self.kv_cluster.update_kv(key_states, query_states, value_states)
