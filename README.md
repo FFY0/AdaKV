@@ -1,14 +1,20 @@
 # AdaKV
 Adaptive Budget Allocation across different attention heads based on their concentration degrees effectively improves budget utilization, thereby improving post-eviction generation quality.
 <p align="center">
-    <img src="./assets/images/main.png" width=70%/>
+    <img src="./assets/images/main.png" width=60%/>
 </p>
-This example includes five KV cache elements with corresponding attention weights. Adaptive budget allocation, reallocating budgets from Head2/3 with sparse concentrations to the dispersed Head1, increases the aggregated weights of retained cache elements from 2.26 to 2.48 compared to Uniform Allocation. This adjustment closely correlates with a reduction in eviction loss. 
+<!-- This example includes five KV cache elements with corresponding attention weights. Adaptive budget allocation, reallocating budgets from Head2/3 with sparse concentrations to the dispersed Head1, increases the aggregated weights of retained cache elements from 2.26 to 2.48 compared to Uniform Allocation. This adjustment closely correlates with a reduction in eviction loss.  -->
 
 ## Updates
 * __[2024.11.08 GQA Support]__ In response to numerous community requests, we’ve just uploaded a new testing branch, named `test_gqa_support`, which introduces support for Grouped Query Attention (GQA) under the methods "SnapKV," "PyramidKV," "Ada-SnapKV," and "Ada-PyramidKV."  You can use the `GQA_eval_longbench.sh` script for direct evaluation on the LongBench benchmark. Detailed results will be released soon.
 * __[2024.11.15 GQA Results]__ We have integrated GQA support for Mistral-7B-Instruct-v0.2 in SnapKV, PyramidKV, and our Ada-KV. You can try it by running the `GQA_eval_longbench.sh` script! Preliminary results on a single A800 are provided in the table below. In future updates, we will include more comprehensive GQA test results in the appendix of our [Ada-KV paper](arxiv.org/abs/2407.11550).
 ![](./assets/images/LongBench_mistral_gqa.png)
+* __[2024.12.12 Community Collaboration ]__ We’re collaborating with NVIDIA’s [KVpress](https://github.com/NVIDIA/kvpress) team to integrate Ada-KV into their excellent project. This effort also aims to build a foundation for future research on head-specific cache compression methods. See the [draft PR](https://github.com/NVIDIA/kvpress/pull/25) for progress. Meanwhile, we’ve conducted broader evaluations of Ada-KV(Ada-SnapKV), including preliminary results on the 4K Ruler Benchmark (context compression with and without questions). For further insights into the evaluation, please refer to the kvpress [repository](https://github.com/NVIDIA/kvpress).
+
+
+<p align="center">
+<img src="./assets/images/4k_ruler_average_score.png" width=50%/>     
+</p>
 
 ## Usage
 
