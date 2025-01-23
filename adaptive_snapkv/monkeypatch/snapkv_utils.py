@@ -50,17 +50,11 @@ class DynamicCacheSplitHeadFlatten(Cache):
             head_lens = cache_kwargs["head_lens"]
             cu_klen = cache_kwargs["cu_klen"]
 
-            import nvtx
-            copy_old_rng = nvtx.start_range("copy old")
-
             # TODO: wrap as a python interface
             from tiny_api_cuda import update_flatten_view
             new_key_cache = update_flatten_view(self.key_cache[layer_idx].view(-1,dim), key_states.view(-1, dim), head_lens, cu_klen)
             new_value_cache = update_flatten_view(self.value_cache[layer_idx].view(-1,dim), value_states.view(-1, dim), head_lens, cu_klen)
 
-            # torch.cuda.synchronize()
-
-            nvtx.end_range(copy_old_rng)
 
             self.key_cache[layer_idx] = new_key_cache
             self.value_cache[layer_idx] = new_value_cache
@@ -185,7 +179,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 class SnapKVCluster():
-    def __init__(self, window_size = 64, max_capacity_prompt = 256 + 64, kernel_size = 5, pooling = 'avgpool', layer_idx = None, num_hidden_layers = None, pyram_mode = False, pyram_beta = 20,gqa_support=False,num_key_value_groups = 1):
+    def __init__(self, window_size = 64, max_capacity_prompt = 256 + 64, kernel_size = 5, pooling = 'avgpool', layer_idx = None, num_hidden_layers = None, pyram_mode = False, pyram_beta = 20,gqa_support=False,num_key_value_groups = 1, gqa_func=None):
         self.window_size = window_size
         self.max_capacity_prompt = max_capacity_prompt
         assert self.max_capacity_prompt - self.window_size > 0
@@ -201,7 +195,10 @@ class SnapKVCluster():
         # support gqa
         self.gqa_support = gqa_support
         self.num_key_value_groups = num_key_value_groups
+        self.gqa_func = gqa_func
         if self.gqa_support:
+            assert gqa_func is not None, "gqa_func should not be None"
+            assert gqa_func in ['max','mean'], "currently gqa_func should be in ['max','mean']"
             if self.num_key_value_groups == 1:
                 warnings.warn("gqa_support is enabled, but num_key_value_groups is 1, which means the model is not using gqa. Please check the model configuration.")
 
@@ -240,7 +237,7 @@ class SnapKVCluster():
 
             self.max_capacity_prompt = max_num - self.layer_idx * steps + self.window_size
             self.pyram_init = True
-            print(f"Pyram mode adaptive capacity, layer: {self.layer_idx}, max_capacity_prompt: {self.max_capacity_prompt}, base_capacity: {self.max_capacity_prompt - self.window_size}")
+            print(f"Pyram mode adaptive capacity, layer: {self.layer_idx}, max_capacity_prompt: {self.max_capacity_prompt}, base_capacity: {self.max_capacity_prompt - self.window_size}", flush=True)
 
         if q_len < self.max_capacity_prompt:
             # support gqa
@@ -264,8 +261,12 @@ class SnapKVCluster():
             # gqa_support 
             if self.gqa_support:
                 attn_weights_mean = attn_weights_mean.view(attn_weights_mean.shape[0], -1, self.num_key_value_groups, attn_weights_mean.shape[-1])
-                attn_weights_mean = attn_weights_mean.mean(dim=-2)
-
+                if self.gqa_func == 'max':
+                    attn_weights_mean = attn_weights_mean.max(dim=-2).values
+                elif self.gqa_func == 'mean':
+                    attn_weights_mean = attn_weights_mean.mean(dim=-2)
+                else:
+                    raise ValueError('gqa_func not supported')
                 
             if self.pooling == 'avgpool':
                 attn_cache = F.avg_pool1d(attn_weights_mean, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
@@ -295,7 +296,7 @@ class SnapKVCluster():
 
 class AdaptiveSnapKVCluster():
     def __init__(self, window_size = 32, kernel_size = 7, pooling = 'maxpool',base_capacity=None,floor_alpha = None,skip = None,normalize=None, 
-                 layer_idx = None, num_hidden_layers = None, pyram_mode = False, pyram_beta = 20,gqa_support=False,num_key_value_groups = 1):
+                 layer_idx = None, num_hidden_layers = None, pyram_mode = False, pyram_beta = 20,gqa_support=False,num_key_value_groups = 1, gqa_func=None):
         self.window_size = window_size
         self.kernel_size = kernel_size
         self.pooling = pooling
@@ -323,7 +324,10 @@ class AdaptiveSnapKVCluster():
          # support gqa
         self.gqa_support = gqa_support
         self.num_key_value_groups = num_key_value_groups
+        self.gqa_func = gqa_func
         if self.gqa_support:
+            assert gqa_func is not None, "gqa_func should not be None"
+            assert gqa_func in ['max','mean'], "currently gqa_func should be in ['max','mean']"
             if self.num_key_value_groups == 1:
                 warnings.warn("gqa_support is enabled, but num_key_value_groups is 1, which means the model is not using gqa. Please check the model configuration.")
 
@@ -346,7 +350,12 @@ class AdaptiveSnapKVCluster():
 
         if self.gqa_support:
             attn_weights_mean = attn_weights_mean.view(attn_weights_mean.shape[0],num_heads//self.num_key_value_groups,self.num_key_value_groups,-1)
-            attn_weights_mean = attn_weights_mean.mean(dim=-2)
+            if self.gqa_func == 'max':
+                attn_weights_mean = attn_weights_mean.max(dim=-2).values
+            elif self.gqa_func == 'mean':
+                attn_weights_mean = attn_weights_mean.mean(dim=-2)
+            else:
+                raise ValueError('gqa_func not supported')
 
         if self.pooling == 'avgpool':
             attn_weights_mean_pooling = F.avg_pool1d(attn_weights_mean, kernel_size=self.kernel_size,
@@ -398,7 +407,7 @@ class AdaptiveSnapKVCluster():
             self.floor_capacity = int(self.base_capacity * self.floor_ratio)
             self.adaptive_capacity = self.base_capacity - self.floor_capacity
             self.pyram_init = True
-            print(f"Pyram mode adaptive capacity, layer: {self.layer_idx}, acap: {self.adaptive_capacity}, bcap: {self.base_capacity}, fcap: {self.floor_capacity}")
+            print(f"Pyram mode adaptive capacity, layer: {self.layer_idx}, acap: {self.adaptive_capacity}, bcap: {self.base_capacity}, fcap: {self.floor_capacity}",  flush=True)
 
         def init_metadata(num_heads, k_lens, klen_sum, max_seqlen_k):
             # init metadata
@@ -525,7 +534,7 @@ class AdaptiveSnapKVCluster():
             self.floor_capacity = int(self.base_capacity * self.floor_ratio)
             self.adaptive_capacity = self.base_capacity - self.floor_capacity
             self.pyram_init = True
-            print(f"Pyram mode adaptive capacity, layer: {self.layer_idx}, acap: {self.adaptive_capacity}, bcap: {self.base_capacity}, fcap: {self.floor_capacity}")
+            print(f"Pyram mode adaptive capacity, layer: {self.layer_idx}, acap: {self.adaptive_capacity}, bcap: {self.base_capacity}, fcap: {self.floor_capacity}",  flush=True)
 
         def init_metadata(num_heads, k_lens, klen_sum, max_seqlen_k):
             # init metadata
@@ -629,13 +638,14 @@ def init_snapkv(self):
             pyram_beta = self.config.pyram_beta,
             gqa_support = self.config.gqa_support,
             num_key_value_groups = self.config.num_attention_heads // self.config.num_key_value_heads,
+            gqa_func = self.config.gqa_func
             )
         if self.config.gqa_support:
             if self.config.model_type != "mistral":
                 warnings.warn("GQA currently supports only for mistral-7B-v0.2 model")
         # if len(self.config.skip) > 0:
         #     warnings.warn("vanilla transformer should not enable skip",self.config.skip)
-        # print(f"Compress config(Snap): window_size={self.kv_cluster.window_size}, max_capacity_prompt={self.kv_cluster.max_capacity_prompt}, kernel_size={self.kv_cluster.kernel_size}, pooling={self.kv_cluster.pooling}, pyram_mode={self.kv_cluster.pyram_mode}, beta={self.kv_cluster.pyram_beta}")
+        print(f"Compress config(Snap): window_size={self.kv_cluster.window_size}, max_capacity_prompt={self.kv_cluster.max_capacity_prompt}, kernel_size={self.kv_cluster.kernel_size}, pooling={self.kv_cluster.pooling}, pyram_mode={self.kv_cluster.pyram_mode}, beta={self.kv_cluster.pyram_beta}",  flush=True)
 
 def init_adaptive_snapkv(self):
     assert hasattr(self.config,'window_size'),"window_size not set"
@@ -662,11 +672,51 @@ def init_adaptive_snapkv(self):
             pyram_beta = self.config.pyram_beta,
             gqa_support = self.config.gqa_support,
             num_key_value_groups = self.config.num_attention_heads // self.config.num_key_value_heads,
+            gqa_func = self.config.gqa_func
             )
         if self.config.gqa_support:
             if self.config.model_type != "mistral":
                 warnings.warn("GQA currently supports only for mistral-7B-v0.2 model")
-        # print(f"Compress config(Ada): window_size={self.kv_cluster.window_size}, base_capacity={self.kv_cluster.base_capacity}, kernel_size={self.kv_cluster.kernel_size}, pooling={self.kv_cluster.pooling}, floor_alpha={self.kv_cluster.floor_ratio}, pyram_mode={self.kv_cluster.pyram_mode}, beta={self.kv_cluster.pyram_beta}")
+        print(f"Compress config(Ada): window_size={self.kv_cluster.window_size}, base_capacity={self.kv_cluster.base_capacity}, kernel_size={self.kv_cluster.kernel_size}, pooling={self.kv_cluster.pooling}, floor_alpha={self.kv_cluster.floor_ratio}, pyram_mode={self.kv_cluster.pyram_mode}, beta={self.kv_cluster.pyram_beta}", flush=True)
+
+
+
+class StreamingLLMKVCluster():
+    def __init__(self, max_capacity_prompt = 256):
+        self.max_capacity_prompt = max_capacity_prompt - 4
+        self.sink_token = 4
+        assert self.max_capacity_prompt - 4 > 0
+
+
+    def update_kv(self, key_states, query_states, value_states, *args, **kwargs):
+        # check if prefix phase
+        assert key_states.shape[-2] == query_states.shape[-2]
+        bsz, num_heads, q_len, head_dim = query_states.shape
+        
+        print(f"StreamingLLM max_capacity_prompt {self.max_capacity_prompt + 4}")
+        
+        if q_len < self.max_capacity_prompt + 4:
+            return key_states, value_states
+        else:
+            k_past_compress = key_states[:, :, :self.sink_token, :]
+            v_past_compress = value_states[:, :, :self.sink_token, :]
+            k_cur = key_states[:, :, -self.max_capacity_prompt:, :]
+            v_cur = value_states[:, :, -self.max_capacity_prompt:, :]
+            key_states = torch.cat([k_past_compress, k_cur], dim = 2)
+            value_states = torch.cat([v_past_compress, v_cur], dim = 2)
+            return key_states, value_states
+
+
+def init_slm(self,**kwargs):
+    assert hasattr(self.config, 'window_size'), "window_size not set"
+    # init only once
+    if not hasattr(self, "kv_cluster"):
+        self.kv_cluster = StreamingLLMKVCluster(
+            max_capacity_prompt = self.config.base_capacity,
+            )
+        print(f"Compress config(SLM): max_cap={self.config.base_capacity}")
+
+
 
 
 

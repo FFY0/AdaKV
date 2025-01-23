@@ -1,37 +1,23 @@
-import inspect
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Optional, Tuple, Union, Any,Dict
+from typing import List, Optional, Tuple, Union
 import warnings
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
-from transformers.models.mistral.modeling_mistral import (
-    apply_rotary_pos_emb,
-    repeat_kv,
-)
-from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask_for_sdpa, \
-    _prepare_4d_causal_attention_mask
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.modeling_flash_attention_utils import _flash_attention_forward
-from transformers.models.mistral.modeling_mistral import (
+from transformers.models.llama.modeling_llama import (
     apply_rotary_pos_emb,
     repeat_kv,
 )
 from transformers.utils import (
     logging,
-    is_flash_attn_2_available,
 )
-from adaptive_snapkv.monkeypatch.snapkv_utils import init_adaptive_snapkv, DynamicCacheSplitHeadFlatten
+from transformers.modeling_flash_attention_utils import _flash_attention_forward
+from adaptive_snapkv.monkeypatch.snapkv_utils import init_slm
 
 logger = logging.get_logger(__name__)
 
-if is_flash_attn_2_available():
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
-    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
-    _flash_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
-
-
-def adaptive_MistralModel_forward(
+def slm_LlamaModel_forward(
     self,
     input_ids: torch.LongTensor = None,
     attention_mask: Optional[torch.Tensor] = None,
@@ -49,10 +35,8 @@ def adaptive_MistralModel_forward(
         output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
     )
     use_cache = use_cache if use_cache is not None else self.config.use_cache
-
     return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-    # retrieve input_ids and inputs_embeds
     if (input_ids is None) ^ (inputs_embeds is not None):
         raise ValueError(
             "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one"
@@ -60,30 +44,39 @@ def adaptive_MistralModel_forward(
 
     if self.gradient_checkpointing and self.training and use_cache:
         logger.warning_once(
-            "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
+            "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
         )
         use_cache = False
 
     if inputs_embeds is None:
         inputs_embeds = self.embed_tokens(input_ids)
 
-    past_key_values = DynamicCacheSplitHeadFlatten.from_legacy_cache(past_key_values)
-    return_legacy_cache = True
+    return_legacy_cache = False
+    if (
+        use_cache and not isinstance(past_key_values, Cache) and not self.training
+    ):  # kept for BC (non `Cache` `past_key_values` inputs)
+        return_legacy_cache = True
+        past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+        logger.warning_once(
+            "We detected that you are passing `past_key_values` as a tuple and this is deprecated and will be removed in v4.43. "
+            "Please use an appropriate `Cache` class (https://huggingface.co/docs/transformers/v4.41.3/en/internal/generation_utils#transformers.Cache)"
+        )
 
     if cache_position is None:
         past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
         cache_position = torch.arange(
             past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
         )
-
     if position_ids is None:
         position_ids = cache_position.unsqueeze(0)
 
     causal_mask = self._update_causal_mask(
-        attention_mask, inputs_embeds, cache_position, past_key_values, use_cache, output_attentions
+        attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
     )
-
     hidden_states = inputs_embeds
+
+    # create position embeddings to be shared across the decoder layers
+    position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
     # decoder layers
     all_hidden_states = () if output_hidden_states else None
@@ -104,6 +97,7 @@ def adaptive_MistralModel_forward(
                 output_attentions,
                 use_cache,
                 cache_position,
+                position_embeddings,
             )
         else:
             layer_outputs = decoder_layer(
@@ -114,6 +108,7 @@ def adaptive_MistralModel_forward(
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
+                position_embeddings=position_embeddings,
             )
 
         hidden_states = layer_outputs[0]
@@ -134,10 +129,10 @@ def adaptive_MistralModel_forward(
     if return_legacy_cache:
         next_cache = next_cache.to_legacy_cache()
 
+    hidden_states = hidden_states[:, -1,:].unsqueeze(1)
+
     if not return_dict:
         return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
-
-    hidden_states = hidden_states[:, -1,:].unsqueeze(1)
     return BaseModelOutputWithPast(
         last_hidden_state=hidden_states,
         past_key_values=next_cache,
@@ -145,23 +140,24 @@ def adaptive_MistralModel_forward(
         attentions=all_self_attns,
     )
 
-def adaptive_mistral_flash_attn2_forward(
+
+def slm_llama_flash_attn2_forward(
     self,
     hidden_states: torch.Tensor,
-    attention_mask: Optional[torch.Tensor] = None,
+    attention_mask: Optional[torch.LongTensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
     past_key_value: Optional[Cache] = None,
     output_attentions: bool = False,
     use_cache: bool = False,
     cache_position: Optional[torch.LongTensor] = None,
-):
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     if isinstance(past_key_value, StaticCache):
         raise ValueError(
             "`static` cache implementation is not compatible with `attn_implementation==flash_attention_2` "
             "make sure to use `sdpa` in the mean time, and open an issue at https://github.com/huggingface/transformers"
         )
-    # NOTE: adakv
-    init_adaptive_snapkv(self)
+    init_slm(self)
 
     output_attentions = False
 
@@ -171,49 +167,46 @@ def adaptive_mistral_flash_attn2_forward(
     key_states = self.k_proj(hidden_states)
     value_states = self.v_proj(hidden_states)
 
+    # Flash attention requires the input to have the shape
+    # batch_size x seq_length x head_dim x hidden_dim
+    # therefore we just need to keep the original shape
     query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
     key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
     value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-    
-    kv_seq_len = key_states.shape[-2]
-    if past_key_value is not None:
-        kv_seq_len += cache_position[0]
 
-    cos, sin = self.rotary_emb(value_states, position_ids)
+    if position_embeddings is None:
+        logger.warning_once(
+            "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+            "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+            "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
+            "removed and `position_embeddings` will be mandatory."
+        )
+        cos, sin = self.rotary_emb(value_states, position_ids)
+    else:
+        cos, sin = position_embeddings
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-    dropout_rate = 0.0 if not self.training else self.attention_dropout
 
-    cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
+    cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
     if past_key_value is not None:
-        # Activate slicing cache only if the config has a value `sliding_windows` attribute
-        cache_has_contents = past_key_value.get_seq_length(self.layer_idx) > 0
-        if (
-            getattr(self.config, "sliding_window", None) is not None
-            and kv_seq_len > self.config.sliding_window
-            and cache_has_contents
-        ):
-            slicing_tokens = 1 - self.config.sliding_window
+        # NOTE: decoding update
+        if q_len == 1:
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+        else:
+            key_states_compress, value_states_compress = self.kv_cluster.update_kv(key_states, query_states, value_states)
+            past_key_value.update(key_states_compress, value_states_compress, self.layer_idx, cache_kwargs)
 
-            past_key = past_key_value[self.layer_idx][0]
-            past_value = past_key_value[self.layer_idx][1]
+    # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
+    # to be able to avoid many of these transpose/reshape/view.
 
-            past_key = past_key[:, :, slicing_tokens:, :].contiguous()
-            past_value = past_value[:, :, slicing_tokens:, :].contiguous()
-
-            if past_key.shape[-2] != self.config.sliding_window - 1:
-                raise ValueError(
-                    f"past key must have a shape of (`batch_size, num_heads, self.config.sliding_window-1, head_dim`), got"
-                    f" {past_key.shape}"
-                )
-
-            if attention_mask is not None:
-                attention_mask = attention_mask[:, slicing_tokens:]
-                attention_mask = torch.cat([attention_mask, torch.ones_like(attention_mask[:, -1:])], dim=-1)
+    dropout_rate = self.attention_dropout if self.training else 0.0
 
     # In PEFT, usually we cast the layer norms in float32 for training stability reasons
     # therefore the input hidden states gets silently casted in float32. Hence, we need
-    # cast them back in float16 just to be sure everything works as expected.
+    # cast them back in the correct dtype just to be sure everything works as expected.
+    # This might slowdown training & inference so it is recommended to not cast the LayerNorms
+    # in fp32. (LlamaRMSNorm handles it correctly)
+
     input_dtype = query_states.dtype
     if input_dtype == torch.float32:
         if torch.is_autocast_enabled():
@@ -234,75 +227,25 @@ def adaptive_mistral_flash_attn2_forward(
         key_states = key_states.to(target_dtype)
         value_states = value_states.to(target_dtype)
 
-    # TODO: naive for now
-    is_prefill = q_len != 1
+    # Reashape to the expected shape for Flash Attention
+    query_states = query_states.transpose(1, 2)
+    key_states = key_states.transpose(1, 2)
+    value_states = value_states.transpose(1, 2)
 
-    if is_prefill:
-        key_states_compress, value_states_compress = self.kv_cluster.update_kv(key_states, query_states, value_states)
-        past_key_value.update(key_states_compress, value_states_compress, self.layer_idx, cache_kwargs)
+    attn_output = _flash_attention_forward(
+        query_states,
+        key_states,
+        value_states,
+        attention_mask,
+        q_len,
+        position_ids=position_ids,
+        dropout=dropout_rate,
+        sliding_window=getattr(self, "sliding_window", None),
+        use_top_left_mask=self._flash_attn_uses_top_left_mask,
+        is_causal=self.is_causal,
+    )
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        # [SnapKV] move to ahead
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        # Reashape to the expected shape for Flash Attention
-        query_states = query_states.transpose(1, 2)
-        key_states = key_states.transpose(1, 2)
-        value_states = value_states.transpose(1, 2)
-
-        attn_output = _flash_attention_forward(
-            query_states,
-            key_states,
-            value_states,
-            attention_mask,
-            q_len,
-            position_ids=position_ids,
-            dropout=dropout_rate,
-            sliding_window=getattr(self.config, "sliding_window", None),
-            use_top_left_mask=self._flash_attn_uses_top_left_mask,
-            is_causal=self.is_causal,
-        )
-
-        attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.head_dim).contiguous()
-
-    else:
-        # decoding
-        cache_kwargs["head_lens"] = self.kv_cluster.head_lens
-        cache_kwargs["cu_klen"] = self.kv_cluster.cu_klen
-        # gqa_support
-        if not self.kv_cluster.gqa_support:
-            key_states = repeat_kv(key_states, self.num_key_value_groups)
-            value_states = repeat_kv(value_states, self.num_key_value_groups)
-        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-
-        # NOTE: update meta data
-        self.kv_cluster.klen_sum += self.num_heads
-        self.kv_cluster.max_seqlen_k += 1
-        self.kv_cluster.cu_klen += self.kv_cluster.cu_offset
-        self.kv_cluster.head_lens += 1
-
-        if self.kv_cluster.gqa_support:
-            query_states = query_states.view(-1, self.num_key_value_groups, self.head_dim)
-        else:
-            query_states = query_states.view(-1, 1, self.head_dim)
-
-        key_states = key_states.view(-1,1,self.head_dim)
-        value_states = value_states.view(-1,1,self.head_dim)
-
-        cu_seqlens_q = self.kv_cluster.cu_qlen
-        cu_seqlens_k = self.kv_cluster.cu_klen
-        max_seqlen_q = 1
-        max_seqlen_k = self.kv_cluster.max_seqlen_k
-
-        attn_output = flash_attn_varlen_func(query_states, key_states, value_states, cu_seqlens_q,
-                                             cu_seqlens_k, max_seqlen_q, max_seqlen_k, causal=True)
-        #  TODO: support batch size > 1
-        assert bsz == 1
-        attn_output = attn_output.reshape(bsz, self.num_heads, q_len, self.head_dim)
-        attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, self.hidden_size)
-
+    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
     attn_output = self.o_proj(attn_output)
 
     if not output_attentions:
@@ -310,7 +253,7 @@ def adaptive_mistral_flash_attn2_forward(
 
     return attn_output, attn_weights, past_key_value
 
-def prepare_inputs_for_generation_mistral(
+def prepare_inputs_for_generation_llama(
     self,
     input_ids,
     past_key_values=None,
@@ -342,9 +285,32 @@ def prepare_inputs_for_generation_mistral(
 
     # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
     if inputs_embeds is not None and cache_position[0] == 0:
-        model_inputs = {"inputs_embeds": inputs_embeds}
+        model_inputs = {"inputs_embeds": inputs_embeds, "input_ids": None}
     else:
-        model_inputs = {"input_ids": input_ids.contiguous()}  # `contiguous()` needed for compilation use cases
+        # The clone here is for the same reason as for `position_ids`.
+        model_inputs = {"input_ids": input_ids.clone(memory_format=torch.contiguous_format), "inputs_embeds": None}
+
+    if isinstance(past_key_values, StaticCache) and attention_mask.ndim == 2:
+        if model_inputs["inputs_embeds"] is not None:
+            batch_size, sequence_length, _ = model_inputs["inputs_embeds"].shape
+            device = model_inputs["inputs_embeds"].device
+        else:
+            batch_size, sequence_length = model_inputs["input_ids"].shape
+            device = model_inputs["input_ids"].device
+
+        dtype = self.lm_head.weight.dtype
+        min_dtype = torch.finfo(dtype).min
+
+        attention_mask = _prepare_4d_causal_attention_mask_with_cache_position(
+            attention_mask,
+            sequence_length=sequence_length,
+            target_length=past_key_values.get_max_length(),
+            dtype=dtype,
+            device=device,
+            min_dtype=min_dtype,
+            cache_position=cache_position,
+            batch_size=batch_size,
+        )
 
     model_inputs.update(
         {
@@ -356,3 +322,4 @@ def prepare_inputs_for_generation_mistral(
         }
     )
     return model_inputs
+
