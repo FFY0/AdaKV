@@ -1,4 +1,7 @@
 # AdaKV
+
+AdaKV has been accepted at NeurIPS 2025! 🎉
+
 <p align="center">
     <img src="./assets/images/main.png" width=40%/>
 </p>
