@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="description"
+        content="Ada-KV: Optimizing KV Cache Eviction by Adaptive Budget Allocation for Efficient LLM Inference">
+  <meta name="keywords" content="KVCache, LLM, Cache Compress">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ada-KV: Optimizing KV Cache Eviction by Adaptive Budget Allocation for Efficient LLM Inference</title>
+
+  <!-- Global site tag (gtag.js) - Google Analytics -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-PYVRSFMDRL"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+
+    function gtag() {
+      dataLayer.push(arguments);
+    }
+
+    gtag('js', new Date());
+
+    gtag('config', 'G-PYVRSFMDRL');
+  </script>
+
+  <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro"
+        rel="stylesheet">
+
+  <link rel="stylesheet" href="./static/css/bulma.min.css">
+  <link rel="stylesheet" href="./static/css/bulma-carousel.min.css">
+  <link rel="stylesheet" href="./static/css/bulma-slider.min.css">
+  <link rel="stylesheet" href="./static/css/fontawesome.all.min.css">
+  <link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
+  <link rel="stylesheet" href="./static/css/index.css">
+
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+  <script defer src="./static/js/fontawesome.all.min.js"></script>
+  <script src="./static/js/bulma-carousel.min.js"></script>
+  <script src="./static/js/bulma-slider.min.js"></script>
+  <script src="./static/js/index.js"></script>
+</head>
+<body>
+
+<nav class="navbar" role="navigation" aria-label="main navigation">
+  <div class="navbar-brand">
+    <a role="button" class="navbar-burger" aria-label="menu" aria-expanded="false">
+      <span aria-hidden="true"></span>
+      <span aria-hidden="true"></span>
+      <span aria-hidden="true"></span>
+    </a>
+  </div>
+  <div class="navbar-menu">
+    <div class="navbar-start" style="flex-grow: 1; justify-content: center;">
+      <a class="navbar-item" href="https://github.com/FFY0">
+      <span class="icon">
+          <i class="fas fa-home"></i>
+      </span>
+      </a>
+
+      <div class="navbar-item has-dropdown is-hoverable">
+        <a class="navbar-link">
+          More Research
+        </a>
+        <div class="navbar-dropdown">
+          <a class="navbar-item" href="https://github.com/FFY0/AdaKV">
+            AdaKV
+          </a>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</nav>
+
+
+<section class="hero">
+  <div class="hero-body">
+    <div class="container is-max-desktop">
+      <div class="columns is-centered">
+        <div class="column has-text-centered">
+          <h1 class="title is-1 publication-title">Ada-KV: Optimizing KV Cache Eviction by Adaptive Budget Allocation for Efficient LLM Inference</h1>
+          <div class="is-size-5 publication-authors">
+            <span class="author-block">
+              <a href="https://github.com/FFY0">Yuan Feng</a><sup>1</sup><sup>,2</sup>,
+            </span>
+            <span class="author-block">
+              <a href="https://github.com/66RING">Junlin Lv</a><sup>1</sup><sup>,2</sup>,
+            </span>
+            <span class="author-block">
+              <a href="">Yukun Cao</a><sup>1</sup><sup>,2</sup>,
+            </span>
+            <span class="author-block">
+              <a href="http://staff.ustc.edu.cn/~xkxie/index-en.html">Xike Xie</a><sup>1</sup><sup>,2</sup>,
+            </span>
+            <span class="author-block">
+              <a href="">S. Kevin Zhou</a><sup>1,3</sup>
+            </span>
+          </div>
+
+          <div class="is-size-5 publication-authors">
+            <span class="author-block"><sup>1</sup>University of Science and Technology of China,</span>
+            <span class="author-block"><sup>2</sup>Data Darkness Lab</span>
+            <span class="author-block"><sup>3</sup>MIRACLE Center</span>
+          </div>
+
+          <div class="column has-text-centered">
+            <div class="publication-links">
+              <!-- PDF Link. -->
+              <span class="link-block">
+                <a href="https://arxiv.org/pdf/2407.11550"
+                   class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                      <i class="fas fa-file-pdf"></i>
+                  </span>
+                  <span>Paper</span>
+                </a>
+              </span>
+              <span class="link-block">
+                <a href="https://arxiv.org/abs/2407.11550"
+                   class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                      <i class="ai ai-arxiv"></i>
+                  </span>
+                  <span>arXiv</span>
+                </a>
+              </span>
+              <!-- Code Link. -->
+              <span class="link-block">
+                <a href="https://github.com/FFY0/AdaKV"
+                   class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                      <i class="fab fa-github"></i>
+                  </span>
+                  <span>Code</span>
+                  </a>
+              </span>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="hero teaser">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <div class="hero-body">
+          <img src="./static/assets/image/main.png"
+             class="ada-method"
+             alt="Ada method."/>
+
+          <h2 class="subtitle has-text-centered">
+            Adaptive Budget Allocation.
+          </h2>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<section class="hero is-light is-small">
+  <div class="hero-body">
+    <div class="container">
+      <div id="results-carousel" class="carousel results-carousel">
+        <div class="">
+          <a href="./static/assets/image/table3.png" target="_blank">
+            <img src="./static/assets/image/table3.png"/>
+          </a>
+        </div>
+
+        <div class="">
+          <a href="./static/assets/image/fg3_4.png" target="_blank">
+            <img src="./static/assets/image/fg3_4.png"/>
+          </a>
+        </div>
+
+        <div class="">
+          <a href="./static/assets/image/table4.png" target="_blank">
+            <img src="./static/assets/image/table4.png"/>
+          </a>
+        </div>
+
+        <div class="">
+          <a href="./static/assets/image/table5.png" target="_blank">
+            <img src="./static/assets/image/table5.png"/>
+          </a>
+        </div>
+
+        <div class="">
+          <a href="./static/assets/image/table6.png" target="_blank">
+            <img src="./static/assets/image/table6.png"/>
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<section class="section">
+  <div class="container is-max-desktop">
+    <!-- Abstract. -->
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3">Abstract</h2>
+        <div class="content has-text-justified">
+          <p>
+            Large Language Models have excelled in various domains but face efficiency
+            challenges due to the growing Key-Value (KV) cache required for long-sequence
+            inference. Recent efforts aim to reduce KV cache size by evicting vast non-critical
+            cache elements during runtime while preserving generation quality. However, these
+            methods typically allocate compression budgets uniformly across all attention
+            heads, ignoring the unique attention patterns of each head. In this paper, we estab-
+            lish a theoretical loss upper bound between pre- and post-eviction attention output,
+            explaining the optimization target of prior cache eviction methods, while guiding
+            the optimization of adaptive budget allocation. Base on this, we propose Ada-KV,
+            the first head-wise adaptive budget allocation strategy. It offers plug-and-play
+            benefits, enabling seamless integration with prior cache eviction methods. Exten-
+            sive evaluations on 13 datasets from Ruler and 16 datasets from LongBench, all
+            conducted under both question-aware and question-agnostic scenarios, demonstrate
+            substantial quality improvements over existing methods.
+          </p>
+        </div>
+      </div>
+    </div>
+    <!--/ Abstract. -->
+
+    <!-- Insigh. -->
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3">Insigh</h2>
+        <div class="content has-text-justified">
+          <p>
+            Attention heads exhibit diverse concentration patterns: some focus narrowly
+            (or sparsely) on a small portion of the cache, while others distribute their
+            attention more broadly . This uniform allocation results in inefficiencies—either
+            wasting cache budgets on heads with sparse concentration or incurring significant
+            eviction losses in heads with dispersed distribution.
+          </p>
+          <img src="./static/assets/image/head_vary.png"/>
+        </div>
+      </div>
+    </div>
+    <!--/ Insigh. -->
+
+  </div>
+</section>
+
+
+<section class="section">
+  <div class="container is-max-desktop">
+
+    <div class="columns is-centered">
+
+      <!-- Memory. -->
+      <div class="column">
+        <div class="content">
+          <h2 class="title is-3">Memory</h2>
+          <p>
+            Peak memory usage.
+          </p>
+          <img src="./static/assets/image/mem.png"/>
+
+        </div>
+      </div>
+      <!--/ Memory. -->
+
+      <!-- Efficiency. -->
+      <div class="column">
+        <h2 class="title is-3">Efficiency</h2>
+        <div class="columns is-centered">
+          <div class="column content">
+            <p>
+              Decoding latency.
+            </p>
+            <img src="./static/assets/image/speed.png"/>
+          </div>
+
+        </div>
+      </div>
+    </div>
+    <!--/ Efficiency. -->
+
+
+  </div>
+</section>
+
+
+<section class="section" id="BibTeX">
+  <div class="container is-max-desktop content">
+    <h2 class="title">BibTeX</h2>
+    <pre><code>@article{feng2024ada,
+  title={Ada-kv: Optimizing kv cache eviction by adaptive budget allocation for efficient llm inference},
+  author={Feng, Yuan and Lv, Junlin and Cao, Yukun and Xie, Xike and Zhou, S Kevin},
+  journal={arXiv preprint arXiv:2407.11550},
+  year={2024}
+}
+
+@article{feng2025identify,
+  title={Identify Critical KV Cache in LLM Inference from an Output Perturbation Perspective},
+  author={Feng, Yuan and Lv, Junlin and Cao, Yukun and Xie, Xike and Zhou, S Kevin},
+  journal={arXiv preprint arXiv:2502.03805},
+  year={2025}
+}</code></pre>
+  </div>
+</section>
+
+
+<footer class="footer">
+  <div class="container">
+    <div class="columns is-centered">
+      <div class="column is-8">
+        <div class="content">
+          <p>
+            This website is licensed under a <a rel="license"
+                                                href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+            Commons Attribution-ShareAlike 4.0 International License</a>.
+          </p>
+          <p>
+            This means you are free to borrow the <a
+              href="https://github.com/nerfies/nerfies.github.io">source code</a> of this website,
+            we just ask that you link back to this page in the footer.
+            Please remember to remove the analytics code included in the header of the website which
+            you do not want on your website.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
