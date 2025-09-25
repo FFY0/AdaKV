@@ -39,7 +39,7 @@ Many cutting-edge methods have integrated the Adaptive Budget Allocation of AdaK
 ### Requirements
 
 ```
-transformers==4.37.2
+transformers==4.44.2
 flash-attn==2.4.0
 
 datasets
